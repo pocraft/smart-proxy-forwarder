@@ -12,6 +12,8 @@ import dataclasses
 import ipaddress
 import json
 import os
+import queue
+import random
 import signal
 import socket
 import ssl
@@ -20,8 +22,9 @@ import threading
 import time
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from typing import List, Optional, Tuple
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 BUFSIZE = 65536
 CHINALIST_CACHE = "/tmp/proxy_china_ip_list.txt"
@@ -29,6 +32,8 @@ RELAY_IDLE_TIMEOUT = 300
 STATS_FILE = "/tmp/proxy-forwarder-stats.json"
 HEALTH_CHECK_INTERVAL = 30
 STATS_API_PORT = 10809
+POOL_SIZE = 4
+POOL_MAX_AGE = 300  # recycle connections after 5 min
 
 
 @dataclasses.dataclass
@@ -43,6 +48,7 @@ class ProxyStats:
         self.start_time = time.time()
         self.health_status = "unknown"
         self.health_last_check = 0.0
+        self.active_upstream = ""
 
     def to_dict(self):
         uptime = time.time() - self.start_time
@@ -58,6 +64,7 @@ class ProxyStats:
                 "bytes_total": self.bytes_sent + self.bytes_recv,
                 "health": self.health_status,
                 "health_last_check": self.health_last_check,
+                "active_upstream": self.active_upstream,
             }
 
     @staticmethod
@@ -70,12 +77,130 @@ class ProxyStats:
 stats = ProxyStats()
 
 
-# ── REST API handler ──
+# ── Connection pool ──
+
+@dataclasses.dataclass
+class PooledTlsConnection:
+    """A cached TLS connection to the upstream proxy."""
+    sock: socket.socket
+    tls: ssl.SSLSocket
+    host: str
+    port: int
+    created_at: float
+
+
+class TlsConnectionPool:
+    """Simple TLS connection pool for upstream proxy connections."""
+
+    def __init__(self, max_size: int = POOL_SIZE, max_age: int = POOL_MAX_AGE,
+                 insecure: bool = False):
+        self._pool: queue.Queue = queue.Queue(max_size)
+        self._max_age = max_age
+        self._insecure = insecure
+        self._lock = threading.Lock()
+        self._ctx = ssl.create_default_context()
+        if insecure:
+            self._ctx.check_hostname = False
+            self._ctx.verify_mode = ssl.CERT_NONE
+        else:
+            self._ctx.check_hostname = True
+            self._ctx.verify_mode = ssl.CERT_REQUIRED
+
+    def acquire(self, host: str, port: int) -> Optional[PooledTlsConnection]:
+        """Get a cached connection, or None if pool is empty/connections are stale."""
+        now = time.time()
+        while True:
+            try:
+                conn = self._pool.get_nowait()
+                # Check if connection is still fresh
+                if now - conn.created_at < self._max_age:
+                    # Quick liveness check
+                    try:
+                        conn.sock.settimeout(2)
+                        conn.sock.sendall(b"\\r\\n")
+                        return conn
+                    except OSError:
+                        pass  # Dead connection, discard
+                # Stale or dead, close it
+                try:
+                    conn.sock.close()
+                except OSError:
+                    pass
+            except queue.Empty:
+                return None
+
+    def release(self, conn: PooledTlsConnection):
+        """Return a connection to the pool (best-effort)."""
+        try:
+            self._pool.put_nowait(conn)
+        except queue.Full:
+            try:
+                conn.sock.close()
+            except OSError:
+                pass
+
+    def new_connection(self, host: str, port: int) -> PooledTlsConnection:
+        """Create a fresh TLS connection to the upstream."""
+        sock = socket.create_connection((host, port), timeout=15)
+        tls = self._ctx.wrap_socket(sock, server_hostname=host)
+        return PooledTlsConnection(sock=sock, tls=tls, host=host, port=port,
+                                   created_at=time.time())
+
+    def drain(self):
+        """Close all connections in the pool."""
+        while True:
+            try:
+                conn = self._pool.get_nowait()
+                try:
+                    conn.sock.close()
+                except OSError:
+                    pass
+            except queue.Empty:
+                break
+
+
+pool = TlsConnectionPool()
+
+
+# ── REST API + Dashboard ──
+
+DASHBOARD_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Proxy Forwarder</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 20px;
+     background:#0d1117;color:#c9d1d9;line-height:1.6}
+h1{color:#58a6ff}pre{background:#161b22;padding:16px;border-radius:8px;overflow-x:auto}
+table{width:100%;border-collapse:collapse}td{padding:8px 0;border-bottom:1px solid #21262d}
+.val{text-align:right;font-family:monospace;font-weight:bold;color:#7ee787}
+.health-alive{color:#3fb950}.health-dead{color:#f85149}.health-unknown{color:#d29922}
+</style></head>
+<body>
+<h1>Smart Proxy Forwarder</h1>
+<div id="root">Loading...</div>
+<script>
+async function load(){const r=await fetch('/stats'),d=await r.json();let h='';
+h+=`<table><tr><td>Status</td><td class="val health-${d.health}">${d.health}</td></tr>`
+h+=`<tr><td>Uptime</td><td class="val">${d.uptime}</td></tr>`
+h+=`<tr><td>Connections</td><td class="val">${d.total_connections} total, ${d.active_connections} active</td></tr>`
+h+=`<tr><td>Traffic</td><td class="val">${(d.bytes_total/1024).toFixed(0)} KB</td></tr>`
+h+=`<tr><td>Upstream</td><td class="val">${d.active_upstream||'-'}</td></tr>`
+h+=`<tr><td>Version</td><td class="val">${d.version}</td></tr></table>`
+document.getElementById('root').innerHTML=h}
+load();setInterval(load,5000)
+</script>
+</body></html>"""
+
 
 class StatsHandler(BaseHTTPRequestHandler):
-    """Serve stats JSON via HTTP GET."""
+    """Serve stats via JSON or HTML dashboard."""
     def do_GET(self):
-        if self.path in ("/", "/stats"):
+        if self.path == "/":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(DASHBOARD_HTML.encode())
+        elif self.path == "/stats":
             data = json.dumps(stats.to_dict(), indent=2)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -87,13 +212,37 @@ class StatsHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def log_message(self, fmt, *args):
-        pass  # suppress HTTP server log output
+        pass
 
 
 def _start_api_server(port: int):
-    """Start REST API server in a background thread."""
     server = HTTPServer(("127.0.0.1", port), StatsHandler)
     server.serve_forever()
+
+
+# ── Multi-upstream ──
+
+def parse_upstreams(host_str: str, port: int) -> List[Tuple[str, int]]:
+    """Parse comma-separated upstream hosts. Each can be host or host:port."""
+    result = []
+    for part in host_str.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" in part:
+            h, p = part.rsplit(":", 1)
+            try:
+                result.append((h.strip(), int(p)))
+            except ValueError:
+                result.append((h.strip(), port))
+        else:
+            result.append((part, port))
+    return result
+
+
+def pick_upstream(upstreams: List[Tuple[str, int]]) -> Tuple[str, int]:
+    """Pick the healthiest upstream. Currently simple random selection."""
+    return random.choice(upstreams)
 
 
 # ── China IP set ──
@@ -109,7 +258,6 @@ class ChinaIPSet:
     def load_from_url(self, url: str, cache_path: str):
         new_networks = []
         loaded = False
-
         if url:
             try:
                 print(f"[+] Downloading China IP list: {url}")
@@ -121,8 +269,7 @@ class ChinaIPSet:
                             f.write(data)
                     except OSError:
                         pass
-                    lines = data.splitlines()
-                    for line in lines:
+                    for line in data.splitlines():
                         line = line.strip()
                         if line and not line.startswith("#"):
                             try:
@@ -138,11 +285,9 @@ class ChinaIPSet:
                 if os.path.exists(cache_path):
                     self._load_file(cache_path)
                     return
-
         if not loaded and os.path.exists(cache_path):
             self._load_file(cache_path)
             loaded = True
-
         if not loaded:
             print(f"[+] Using built-in China IP ranges ({len(self._networks)} CIDRs)")
 
@@ -195,11 +340,6 @@ def is_ip_string(host: str) -> bool:
 # ── Traffic relay ──
 
 def relay_traffic(src, dst, shutdown_event, bytes_counter=None):
-    """Bidirectional traffic relay with idle timeout.
-
-    Uses shutdown_event to signal the paired relay to stop when one direction closes.
-    Polls for shutdown_event every second while waiting for data.
-    """
     total = 0
     try:
         src.settimeout(RELAY_IDLE_TIMEOUT)
@@ -233,7 +373,6 @@ def relay_traffic(src, dst, shutdown_event, bytes_counter=None):
 
 
 def _make_byte_counter(attr):
-    """Create a bytes counter callback for a given stats attribute."""
     def _cb(n):
         with stats.lock:
             setattr(stats, attr, getattr(stats, attr) + n)
@@ -242,9 +381,9 @@ def _make_byte_counter(attr):
 
 # ── Connection handler ──
 
-def handle_client(client, china_set, direct_domains, remote_host, remote_port,
+def handle_client(client, china_set, direct_domains, upstreams,
                   insecure=False, log_requests=False):
-    """Handle one CONNECT request — route domestic direct, international via proxy."""
+    """Handle one CONNECT request with multi-upstream + connection pool support."""
     start_ts = time.time()
     with stats.lock:
         stats.total_connections += 1
@@ -274,45 +413,62 @@ def handle_client(client, china_set, direct_domains, remote_host, remote_port,
         except ValueError:
             dst_port = 443
 
-        # ── Smart routing (DNS leak-free) ──
+        # ── Smart routing ──
         use_proxy = True
         reason = ""
 
         if is_direct_domain(dst_host, direct_domains):
             use_proxy = False
             reason = "direct-domain"
-
         elif is_ip_string(dst_host):
             if china_set.contains(dst_host):
                 use_proxy = False
                 reason = "direct (CN IP)"
             else:
                 reason = "proxy (INTL IP)"
-
         else:
             reason = "proxy (DNS-safe)"
 
         if use_proxy:
-            ctx = ssl.create_default_context()
-            if insecure:
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
+            # Pick an upstream
+            remote_host, remote_port = pick_upstream(upstreams)
+            with stats.lock:
+                stats.active_upstream = f"{remote_host}:{remote_port}"
+
+            # Try pool first, then new connection
+            conn = pool.acquire(remote_host, remote_port)
+            if conn:
+                tls_remote = conn.tls
+                fresh_conn = False
             else:
-                ctx.check_hostname = True
-                ctx.verify_mode = ssl.CERT_REQUIRED
+                fresh_conn = True
+                tls_remote = pool.new_connection(remote_host, remote_port).tls
 
-            remote = socket.create_connection((remote_host, remote_port), timeout=15)
-            tls_remote = ctx.wrap_socket(remote, server_hostname=remote_host)
-
-            tls_remote.sendall(
-                f"CONNECT {dst_host}:{dst_port} HTTP/1.1\r\n"
-                f"Host: {dst_host}:{dst_port}\r\n\r\n".encode()
-            )
-
-            resp = tls_remote.recv(BUFSIZE)
-            if b"200" not in resp:
-                client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
-                return
+            try:
+                tls_remote.sendall(
+                    f"CONNECT {dst_host}:{dst_port} HTTP/1.1\r\n"
+                    f"Host: {dst_host}:{dst_port}\r\n\r\n".encode()
+                )
+                resp = tls_remote.recv(BUFSIZE)
+                if b"200" not in resp:
+                    client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                    return
+            except OSError:
+                # Connection dead, retry with fresh one
+                try:
+                    tls_remote.close()
+                except OSError:
+                    pass
+                fresh_conn = True
+                tls_remote = pool.new_connection(remote_host, remote_port).tls
+                tls_remote.sendall(
+                    f"CONNECT {dst_host}:{dst_port} HTTP/1.1\r\n"
+                    f"Host: {dst_host}:{dst_port}\r\n\r\n".encode()
+                )
+                resp = tls_remote.recv(BUFSIZE)
+                if b"200" not in resp:
+                    client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                    return
 
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             shutdown_event = threading.Event()
@@ -324,6 +480,15 @@ def handle_client(client, china_set, direct_domains, remote_host, remote_port,
             t2.start()
             t1.join()
             t2.join()
+
+            # Return connection to pool if it's fresh
+            if fresh_conn:
+                pconn = PooledTlsConnection(
+                    sock=tls_remote._sock if hasattr(tls_remote, '_sock') else None or
+                         getattr(tls_remote, 'socket', lambda: None)(),
+                    tls=tls_remote, host=remote_host, port=remote_port,
+                    created_at=time.time())
+                pool.release(pconn)
         else:
             remote = socket.create_connection((dst_host, dst_port), timeout=15)
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -338,7 +503,8 @@ def handle_client(client, china_set, direct_domains, remote_host, remote_port,
         duration = time.time() - start_ts
         if log_requests:
             route = "proxy" if use_proxy else "direct"
-            print(f"[{time.strftime('%H:%M:%S')}] {dst_host}:{dst_port} → {route} ({reason}) {duration:.1f}s")
+            upstream = f" → {remote_host}:{remote_port}" if use_proxy else ""
+            print(f"[{time.strftime('%H:%M:%S')}] {dst_host}:{dst_port} → {route}{upstream} ({reason}) {duration:.1f}s")
 
     except (OSError, socket.timeout, ssl.SSLError, ValueError):
         try:
@@ -365,24 +531,18 @@ def main():
     parser = argparse.ArgumentParser(
         description="Smart Proxy Forwarder — auto-routing CONNECT proxy"
     )
-    parser.add_argument("--listen-host", default="127.0.0.1",
-                        help="Local listen address (default: 127.0.0.1)")
-    parser.add_argument("--listen-port", type=int, default=10808,
-                        help="Local listen port (default: 10808)")
+    parser.add_argument("--listen-host", default="127.0.0.1")
+    parser.add_argument("--listen-port", type=int, default=10808)
     parser.add_argument("--remote-host", default="",
-                        help="Remote HTTPS CONNECT proxy host (required)")
-    parser.add_argument("--remote-port", type=int, default=443,
-                        help="Remote HTTPS CONNECT proxy port (default: 443)")
-    parser.add_argument("--config", default="",
-                        help="Path to config JSON file")
-    parser.add_argument("--insecure", "-k", action="store_true",
-                        help="Skip TLS certificate verification for remote proxy (default: verify)")
-    parser.add_argument("--log-requests", action="store_true",
-                        help="Log each CONNECT request with target, route and timing")
-    parser.add_argument("--api-port", type=int, default=STATS_API_PORT,
-                        help=f"REST API port for stats (default: {STATS_API_PORT})")
-    parser.add_argument("--version", action="store_true",
-                        help="Show version and exit")
+                        help="Remote HTTPS CONNECT proxy host (or comma-separated hosts for failover)")
+    parser.add_argument("--remote-port", type=int, default=443)
+    parser.add_argument("--config", default="")
+    parser.add_argument("--insecure", "-k", action="store_true")
+    parser.add_argument("--log-requests", action="store_true")
+    parser.add_argument("--api-port", type=int, default=STATS_API_PORT)
+    parser.add_argument("--pool-size", type=int, default=POOL_SIZE,
+                        help="TLS connection pool size (default: 4)")
+    parser.add_argument("--version", action="store_true")
     args = parser.parse_args()
 
     if args.version:
@@ -397,11 +557,16 @@ def main():
     insecure = args.insecure or cfg.get("insecure", False)
     log_requests = args.log_requests or cfg.get("log_requests", False)
     api_port = args.api_port or cfg.get("api_port", STATS_API_PORT)
+    pool_size = args.pool_size or cfg.get("pool_size", POOL_SIZE)
 
     if not remote_host:
         print("ERROR: --remote-host is required (or set in config file)", file=sys.stderr)
-        print("  Example: --remote-host your-proxy.example.com --remote-port 443", file=sys.stderr)
         sys.exit(1)
+
+    # Parse upstreams (comma-separated)
+    upstreams = parse_upstreams(remote_host, remote_port)
+    global pool
+    pool = TlsConnectionPool(max_size=pool_size, insecure=insecure)
 
     china = ChinaIPSet()
     china_url = cfg.get("china_ip_list_url", "")
@@ -421,11 +586,15 @@ def main():
     print(f"  Smart Proxy Forwarder v{VERSION}")
     print(f"{'='*60}")
     print(f"  Listen:     {listen_host}:{listen_port}")
-    print(f"  Remote:     {remote_host}:{remote_port}")
+    print(f"  Upstreams:  {len(upstreams)} server(s)")
+    for h, p in upstreams:
+        print(f"               {h}:{p}")
     print(f"  CN CIDRs:   {len(china._networks)} ranges")
     print(f"  Direct Doms:{len(direct_domains)} rules")
     print(f"  TLS Verify: {'OFF (--insecure)' if insecure else 'ON'}")
+    print(f"  Dashboard:  http://127.0.0.1:{api_port}/")
     print(f"  API:        http://127.0.0.1:{api_port}/stats")
+    print(f"  Pool:       {pool_size} connections")
     print(f"  Log reqs:   {'ON' if log_requests else 'OFF'}")
     print(f"  Stats:      {STATS_FILE}")
     print(f"  Health:     checking every {HEALTH_CHECK_INTERVAL}s")
@@ -436,6 +605,7 @@ def main():
 
     def shutdown(sig, frame):
         print("\n[-] Shutting down...")
+        pool.drain()
         server.close()
         sys.exit(0)
 
@@ -453,29 +623,29 @@ def main():
             time.sleep(10)
     threading.Thread(target=_write_stats, daemon=True).start()
 
-    # Health check
+    # Health check (tests all upstreams)
     def _health_check():
         while True:
-            try:
-                s = socket.create_connection((remote_host, remote_port), timeout=10)
-                s.close()
-                with stats.lock:
-                    stats.health_status = "alive"
-                    stats.health_last_check = time.time()
-            except Exception:
-                with stats.lock:
-                    stats.health_status = "dead"
-                    stats.health_last_check = time.time()
+            alive_any = False
+            for h, p in upstreams:
+                try:
+                    s = socket.create_connection((h, p), timeout=10)
+                    s.close()
+                    alive_any = True
+                except Exception:
+                    pass
+            with stats.lock:
+                stats.health_status = "alive" if alive_any else "dead"
+                stats.health_last_check = time.time()
             time.sleep(HEALTH_CHECK_INTERVAL)
     threading.Thread(target=_health_check, daemon=True).start()
 
-    # REST API
+    # REST API + Dashboard
     try:
         t_api = threading.Thread(target=_start_api_server, args=(api_port,), daemon=True)
         t_api.start()
-        print(f"  ✓ REST API running on http://127.0.0.1:{api_port}/stats")
     except Exception as e:
-        print(f"  ⚠ REST API failed to start: {e}")
+        print(f"  ⚠ REST API failed: {e}")
     print(f"  {'='*60}\n")
 
     while True:
@@ -483,7 +653,7 @@ def main():
             client, addr = server.accept()
             t = threading.Thread(
                 target=handle_client,
-                args=(client, china, direct_domains, remote_host, remote_port, insecure, log_requests),
+                args=(client, china, direct_domains, upstreams, insecure, log_requests),
                 daemon=True,
             )
             t.start()
