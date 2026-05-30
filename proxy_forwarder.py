@@ -168,24 +168,45 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <style>
 body{font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 20px;
      background:#0d1117;color:#c9d1d9;line-height:1.6}
-h1{color:#58a6ff}pre{background:#161b22;padding:16px;border-radius:8px;overflow-x:auto}
+h1{color:#58a6ff}.lang-bar{text-align:right;margin-bottom:16px}
+.lang-btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:4px 12px;cursor:pointer;border-radius:4px;font-size:13px}
+.lang-btn.active{background:#1f6feb;border-color:#1f6feb;color:#fff}
+pre{background:#161b22;padding:16px;border-radius:8px;overflow-x:auto}
 table{width:100%;border-collapse:collapse}td{padding:8px 0;border-bottom:1px solid #21262d}
 .val{text-align:right;font-family:monospace;font-weight:bold;color:#7ee787}
 .health-alive{color:#3fb950}.health-dead{color:#f85149}.health-unknown{color:#d29922}
 </style></head>
 <body>
-<h1>🔄 代理转发器</h1>
+<div class="lang-bar">
+<button class="lang-btn active" onclick="setLang('zh')">中文</button>
+<button class="lang-btn" onclick="setLang('en')">EN</button>
+</div>
+<h1 id="title">🔄 代理转发器</h1>
 <div id="root">加载中...</div>
 <script>
-async function load(){const r=await fetch('/stats'),d=await r.json();let h='';
-const healthMap={'alive':'正常','dead':'离线','unknown':'未知'};
-h+=`<table><tr><td>状态</td><td class="val health-${d.health}">${healthMap[d.health]||d.health}</td></tr>`
-h+=`<tr><td>运行时长</td><td class="val">${d.uptime}</td></tr>`
-h+=`<tr><td>连接数</td><td class="val">${d.total_connections} 总 / ${d.active_connections} 活跃</td></tr>`
-h+=`<tr><td>流量</td><td class="val">${(d.bytes_total/1024).toFixed(0)} KB</td></tr>`
-h+=`<tr><td>上游</td><td class="val">${d.active_upstream||'-'}</td></tr>`
-h+=`<tr><td>池大小</td><td class="val">${d.pool_size||'-'}</td></tr>`
-h+=`<tr><td>版本</td><td class="val">${d.version}</td></tr></table>`
+const L={zh:{
+title:'🔄 代理转发器',load:'加载中...',status:'状态',alive:'正常',dead:'离线',unknown:'未知',
+uptime:'运行时长',conn:'连接数',connFmt:(t,a)=>t+' 总 / '+a+' 活跃',
+traffic:'流量',upstream:'上游',pool:'池大小',ver:'版本'
+},en:{
+title:'🔄 Proxy Forwarder',load:'Loading...',status:'Status',alive:'Alive',dead:'Dead',unknown:'Unknown',
+uptime:'Uptime',conn:'Connections',connFmt:(t,a)=>t+' total, '+a+' active',
+traffic:'Traffic',upstream:'Upstream',pool:'Pool Size',ver:'Version'
+}};
+let lang='zh';
+function setLang(l){lang=l;
+document.querySelectorAll('.lang-btn').forEach(b=>b.className='lang-btn'+(b.textContent===(l==='zh'?'中文':'EN')?' active':''));
+document.getElementById('title').textContent=L[l].title;
+document.getElementById('root').textContent=L[l].load;load();}
+async function load(){const r=await fetch('/stats'),d=await r.json();let h='';const t=L[lang];
+h+='<table>';
+h+=`<tr><td>${t.status}</td><td class="val health-${d.health}">${t[d.health]||d.health}</td></tr>`;
+h+=`<tr><td>${t.uptime}</td><td class="val">${d.uptime}</td></tr>`;
+h+=`<tr><td>${t.conn}</td><td class="val">${t.connFmt(d.total_connections,d.active_connections)}</td></tr>`;
+h+=`<tr><td>${t.traffic}</td><td class="val">${(d.bytes_total/1024).toFixed(0)} KB</td></tr>`;
+h+=`<tr><td>${t.upstream}</td><td class="val">${d.active_upstream||'-'}</td></tr>`;
+h+=`<tr><td>${t.pool}</td><td class="val">${d.pool_size||'-'}</td></tr>`;
+h+=`<tr><td>${t.ver}</td><td class="val">${d.version}</td></tr></table>`;
 document.getElementById('root').innerHTML=h}
 load();setInterval(load,5000)
 </script>
