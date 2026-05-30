@@ -65,6 +65,7 @@ class ProxyStats:
                 "health": self.health_status,
                 "health_last_check": self.health_last_check,
                 "active_upstream": self.active_upstream,
+                "pool_size": POOL_SIZE,
             }
 
     @staticmethod
@@ -106,22 +107,19 @@ class TlsConnectionPool:
             self._ctx.check_hostname = True
             self._ctx.verify_mode = ssl.CERT_REQUIRED
 
-    def acquire(self, host: str, port: int) -> Optional[PooledTlsConnection]:
-        """Get a cached connection, or None if pool is empty/connections are stale."""
+    def acquire(self, host: str, port: int) -> Optional[ssl.SSLSocket]:
+        """Get a pre-warmed TLS connection, or None if pool is empty."""
         now = time.time()
         while True:
             try:
                 conn = self._pool.get_nowait()
-                # Check if connection is still fresh
                 if now - conn.created_at < self._max_age:
-                    # Quick liveness check
+                    # Quick liveness: just try to getpeername
                     try:
-                        conn.sock.settimeout(2)
-                        conn.sock.sendall(b"\\r\\n")
-                        return conn
+                        conn.sock.getpeername()
+                        return conn.tls
                     except OSError:
-                        pass  # Dead connection, discard
-                # Stale or dead, close it
+                        pass
                 try:
                     conn.sock.close()
                 except OSError:
@@ -435,13 +433,11 @@ def handle_client(client, china_set, direct_domains, upstreams,
             with stats.lock:
                 stats.active_upstream = f"{remote_host}:{remote_port}"
 
-            # Try pool first, then new connection
-            conn = pool.acquire(remote_host, remote_port)
-            if conn:
-                tls_remote = conn.tls
-                fresh_conn = False
-            else:
-                fresh_conn = True
+            # Try pre-warmed pool first, fall back to fresh connection.
+            # Note: after a TLS connection is used for a CONNECT tunnel,
+            # it is consumed and cannot be reused. Pool is only for pre-warming.
+            tls_remote = pool.acquire(remote_host, remote_port)
+            if tls_remote is None:
                 tls_remote = pool.new_connection(remote_host, remote_port).tls
 
             try:
@@ -459,7 +455,6 @@ def handle_client(client, china_set, direct_domains, upstreams,
                     tls_remote.close()
                 except OSError:
                     pass
-                fresh_conn = True
                 tls_remote = pool.new_connection(remote_host, remote_port).tls
                 tls_remote.sendall(
                     f"CONNECT {dst_host}:{dst_port} HTTP/1.1\r\n"
@@ -480,15 +475,7 @@ def handle_client(client, china_set, direct_domains, upstreams,
             t2.start()
             t1.join()
             t2.join()
-
-            # Return connection to pool if it's fresh
-            if fresh_conn:
-                pconn = PooledTlsConnection(
-                    sock=tls_remote._sock if hasattr(tls_remote, '_sock') else None or
-                         getattr(tls_remote, 'socket', lambda: None)(),
-                    tls=tls_remote, host=remote_host, port=remote_port,
-                    created_at=time.time())
-                pool.release(pconn)
+            # Connection is consumed after tunnel closes — NOT returned to pool.
         else:
             remote = socket.create_connection((dst_host, dst_port), timeout=15)
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
