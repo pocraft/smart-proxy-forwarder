@@ -163,8 +163,8 @@ pool = TlsConnectionPool()
 # ── REST API + Dashboard ──
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Proxy Forwarder</title>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>代理转发器</title>
 <style>
 body{font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 20px;
      background:#0d1117;color:#c9d1d9;line-height:1.6}
@@ -174,16 +174,18 @@ table{width:100%;border-collapse:collapse}td{padding:8px 0;border-bottom:1px sol
 .health-alive{color:#3fb950}.health-dead{color:#f85149}.health-unknown{color:#d29922}
 </style></head>
 <body>
-<h1>Smart Proxy Forwarder</h1>
-<div id="root">Loading...</div>
+<h1>🔄 代理转发器</h1>
+<div id="root">加载中...</div>
 <script>
 async function load(){const r=await fetch('/stats'),d=await r.json();let h='';
-h+=`<table><tr><td>Status</td><td class="val health-${d.health}">${d.health}</td></tr>`
-h+=`<tr><td>Uptime</td><td class="val">${d.uptime}</td></tr>`
-h+=`<tr><td>Connections</td><td class="val">${d.total_connections} total, ${d.active_connections} active</td></tr>`
-h+=`<tr><td>Traffic</td><td class="val">${(d.bytes_total/1024).toFixed(0)} KB</td></tr>`
-h+=`<tr><td>Upstream</td><td class="val">${d.active_upstream||'-'}</td></tr>`
-h+=`<tr><td>Version</td><td class="val">${d.version}</td></tr></table>`
+const healthMap={'alive':'正常','dead':'离线','unknown':'未知'};
+h+=`<table><tr><td>状态</td><td class="val health-${d.health}">${healthMap[d.health]||d.health}</td></tr>`
+h+=`<tr><td>运行时长</td><td class="val">${d.uptime}</td></tr>`
+h+=`<tr><td>连接数</td><td class="val">${d.total_connections} 总 / ${d.active_connections} 活跃</td></tr>`
+h+=`<tr><td>流量</td><td class="val">${(d.bytes_total/1024).toFixed(0)} KB</td></tr>`
+h+=`<tr><td>上游</td><td class="val">${d.active_upstream||'-'}</td></tr>`
+h+=`<tr><td>池大小</td><td class="val">${d.pool_size||'-'}</td></tr>`
+h+=`<tr><td>版本</td><td class="val">${d.version}</td></tr></table>`
 document.getElementById('root').innerHTML=h}
 load();setInterval(load,5000)
 </script>
