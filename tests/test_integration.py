@@ -174,19 +174,16 @@ class TestAPIServerStart(unittest.TestCase):
     def test_api_server_starts_and_serves(self):
         import socket
 
-        # Find a free port
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
 
-        # Start server in thread
         from http.server import HTTPServer
         server = HTTPServer(("127.0.0.1", port), pf.StatsHandler)
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
         time.sleep(0.2)
 
-        # Query it
         import urllib.request
         resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/stats")
         data = json.loads(resp.read().decode())
@@ -195,6 +192,7 @@ class TestAPIServerStart(unittest.TestCase):
         self.assertIn("health", data)
         self.assertEqual(data["version"], pf.VERSION)
         server.shutdown()
+        server.server_close()
 
 
 class TestVersion(unittest.TestCase):

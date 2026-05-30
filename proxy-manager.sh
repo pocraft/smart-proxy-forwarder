@@ -103,5 +103,6 @@ case "${1:-status}" in
     stop) stop ;;
     restart) stop; sleep 1; start ;;
     status) status ;;
-    *) echo "Usage: $0 {start|stop|restart|status}" ;;
+    logs) tail -50 "$LOG_FILE" 2>/dev/null || echo "No log file at $LOG_FILE" ;;
+    *) echo "Usage: $0 {start|stop|restart|status|logs}" ;;
 esac
