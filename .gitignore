@@ -6,3 +6,17 @@ __pycache__/
 .DS_Store
 config.json
 !config.example.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+
+# Python
+dist/
+build/
+*.egg-info/
