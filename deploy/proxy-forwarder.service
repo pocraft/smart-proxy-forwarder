@@ -1,0 +1,21 @@
+[Unit]
+Description=Smart Proxy Forwarder — auto-routing CONNECT proxy
+Documentation=https://github.com/601494530-create/smart-proxy-forwarder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+ExecStart=/usr/bin/python3 /etc/proxy-forwarder/proxy_forwarder.py --config /etc/proxy-forwarder/config.json
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+# Sandboxing
+ProtectSystem=full
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

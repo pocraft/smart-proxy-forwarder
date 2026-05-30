@@ -19,14 +19,16 @@ import sys
 import threading
 import time
 import urllib.request
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 VERSION = "1.0.0"
 
 BUFSIZE = 65536
 CHINALIST_CACHE = "/tmp/proxy_china_ip_list.txt"
-RELAY_IDLE_TIMEOUT = 300  # reap idle connections after 5 min
+RELAY_IDLE_TIMEOUT = 300
 STATS_FILE = "/tmp/proxy-forwarder-stats.json"
-HEALTH_CHECK_INTERVAL = 30  # seconds between proxy health checks
+HEALTH_CHECK_INTERVAL = 30
+STATS_API_PORT = 10809
 
 
 @dataclasses.dataclass
@@ -67,51 +69,34 @@ class ProxyStats:
 
 stats = ProxyStats()
 
-# Default direct-connect domains (bypass proxy, no DNS needed)
-DEFAULT_DIRECT_DOMAINS = {
-    # Chinese services
-    "*.baidu.com", "*.qq.com", "*.aliyun.com", "*.taobao.com",
-    "*.jd.com", "*.weixin.qq.com", "*.wechat.com", "*.163.com",
-    "*.sina.com", "*.sohu.com", "*.zhihu.com", "*.bilibili.com",
-    "*.douyin.com", "*.bytedance.com", "*.tencent.com", "*.netease.com",
-    "*.xiaomi.com", "*.huawei.com", "*.ctrip.com", "*.meituan.com",
-    "*.dianping.com", "*.ele.me", "*.58.com", "*.dangdang.com",
-    "*.yhd.com", "*.suning.com", "*.gmw.cn",
-    # CDN / cloud
-    "*.aliyuncs.com", "*.alibaba.com", "*.cainiao.com",
-    # AI / LLM
-    "*.deepseek.com", "api.deepseek.com",
-    # News
-    "*.people.com.cn", "*.xinhuanet.com", "*.cctv.com",
-    "*.chinanews.com", "*.thepaper.cn", "*.yicai.com",
-    "*.cnstock.com", "*.eastmoney.com", "*.10jqka.com",
-    "*.cls.cn", "*.wallstreetcn.com",
-    # Tech / dev
-    "*.csdn.net", "*.oschina.net", "*.cnblogs.com",
-    "*.36kr.com", "*.huxiu.com", "*.geekpark.net",
-    # OS / package mirrors
-    "*.ustc.edu.cn", "*.tuna.tsinghua.edu.cn", "*.aliyun.com",
-    "*.kernel.org", "*.pypi.org", "*.python.org",
-    "*.npmjs.org", "*.rubygems.org",
-    # Local
-    "localhost", "127.0.0.1", "::1",
-}
 
-# Built-in China IP ranges (CIDR)
-CHINA_CIDRS = [
-    "1.0.0.0/8", "14.0.0.0/8", "27.0.0.0/8", "36.0.0.0/8",
-    "39.0.0.0/8", "42.0.0.0/8", "49.0.0.0/8", "58.0.0.0/8",
-    "59.0.0.0/8", "60.0.0.0/8", "61.0.0.0/8", "101.0.0.0/8",
-    "103.0.0.0/8", "106.0.0.0/8", "110.0.0.0/8", "111.0.0.0/8",
-    "112.0.0.0/8", "113.0.0.0/8", "114.0.0.0/8", "115.0.0.0/8",
-    "116.0.0.0/8", "117.0.0.0/8", "118.0.0.0/8", "119.0.0.0/8",
-    "120.0.0.0/8", "121.0.0.0/8", "122.0.0.0/8", "123.0.0.0/8",
-    "124.0.0.0/8", "125.0.0.0/8", "169.254.0.0/16", "180.0.0.0/8",
-    "182.0.0.0/8", "183.0.0.0/8", "202.0.0.0/8", "203.0.0.0/8",
-    "210.0.0.0/8", "211.0.0.0/8", "218.0.0.0/8", "219.0.0.0/8",
-    "220.0.0.0/8", "221.0.0.0/8", "222.0.0.0/8", "223.0.0.0/8",
-]
+# ── REST API handler ──
 
+class StatsHandler(BaseHTTPRequestHandler):
+    """Serve stats JSON via HTTP GET."""
+    def do_GET(self):
+        if self.path in ("/", "/stats"):
+            data = json.dumps(stats.to_dict(), indent=2)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data.encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, fmt, *args):
+        pass  # suppress HTTP server log output
+
+
+def _start_api_server(port: int):
+    """Start REST API server in a background thread."""
+    server = HTTPServer(("127.0.0.1", port), StatsHandler)
+    server.serve_forever()
+
+
+# ── China IP set ──
 
 class ChinaIPSet:
     """China IP address set with CIDR matching."""
@@ -122,8 +107,6 @@ class ChinaIPSet:
             self._networks.append(ipaddress.ip_network(cidr, strict=False))
 
     def load_from_url(self, url: str, cache_path: str):
-        """Download China IP list from URL, fall back to built-in."""
-        # Temporary list: replace self._networks only on success
         new_networks = []
         loaded = False
 
@@ -133,7 +116,6 @@ class ChinaIPSet:
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     data = resp.read().decode("utf-8")
-                    # Save to cache
                     try:
                         with open(cache_path, "w") as f:
                             f.write(data)
@@ -162,7 +144,6 @@ class ChinaIPSet:
             loaded = True
 
         if not loaded:
-            # Keep the built-in CIDRs from __init__
             print(f"[+] Using built-in China IP ranges ({len(self._networks)} CIDRs)")
 
     def _load_file(self, path: str):
@@ -179,7 +160,6 @@ class ChinaIPSet:
                     pass
 
     def contains(self, ip_str: str) -> bool:
-        """Check if IP is in China."""
         try:
             ip = ipaddress.ip_address(ip_str)
             return any(ip in net for net in self._networks)
@@ -187,8 +167,9 @@ class ChinaIPSet:
             return False
 
 
+# ── Routing helpers ──
+
 def is_direct_domain(host: str, direct_domains: set) -> bool:
-    """Check if a hostname should bypass the proxy (no DNS lookup)."""
     if not host:
         return False
     host_lower = host.lower()
@@ -204,13 +185,14 @@ def is_direct_domain(host: str, direct_domains: set) -> bool:
 
 
 def is_ip_string(host: str) -> bool:
-    """Check if host is a raw IPv4/IPv6 string (no DNS resolution needed)."""
     try:
         ipaddress.ip_address(host)
         return True
     except ValueError:
         return False
 
+
+# ── Traffic relay ──
 
 def relay_traffic(src, dst, shutdown_event, bytes_counter=None):
     """Bidirectional traffic relay with idle timeout.
@@ -258,8 +240,12 @@ def _make_byte_counter(attr):
     return _cb
 
 
-def handle_client(client, china_set, direct_domains, remote_host, remote_port, insecure=False):
+# ── Connection handler ──
+
+def handle_client(client, china_set, direct_domains, remote_host, remote_port,
+                  insecure=False, log_requests=False):
     """Handle one CONNECT request — route domestic direct, international via proxy."""
+    start_ts = time.time()
     with stats.lock:
         stats.total_connections += 1
         stats.active_connections += 1
@@ -292,25 +278,21 @@ def handle_client(client, china_set, direct_domains, remote_host, remote_port, i
         use_proxy = True
         reason = ""
 
-        # 1. Direct domain list (no DNS involved)
         if is_direct_domain(dst_host, direct_domains):
             use_proxy = False
             reason = "direct-domain"
 
-        # 2. Raw IP address → check China IP set (no DNS lookup)
         elif is_ip_string(dst_host):
             if china_set.contains(dst_host):
                 use_proxy = False
-                reason = f"CN-IP ({dst_host})"
+                reason = "direct (CN IP)"
             else:
-                reason = f"INTL-IP ({dst_host})"
+                reason = "proxy (INTL IP)"
 
-        # 3. Hostname not in direct list → default to proxy (DNS-safe)
         else:
             reason = "proxy (DNS-safe)"
 
         if use_proxy:
-            # ── Route via remote HTTPS proxy ──
             ctx = ssl.create_default_context()
             if insecure:
                 ctx.check_hostname = False
@@ -334,16 +316,15 @@ def handle_client(client, china_set, direct_domains, remote_host, remote_port, i
 
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             shutdown_event = threading.Event()
-            t1 = threading.Thread(target=relay_traffic, args=(client, tls_remote, shutdown_event,
-                _make_byte_counter('bytes_recv')), daemon=True)
-            t2 = threading.Thread(target=relay_traffic, args=(tls_remote, client, shutdown_event,
-                _make_byte_counter('bytes_sent')), daemon=True)
+            t1 = threading.Thread(target=relay_traffic, args=(
+                client, tls_remote, shutdown_event, _make_byte_counter('bytes_recv')), daemon=True)
+            t2 = threading.Thread(target=relay_traffic, args=(
+                tls_remote, client, shutdown_event, _make_byte_counter('bytes_sent')), daemon=True)
             t1.start()
             t2.start()
             t1.join()
             t2.join()
         else:
-            # ── Direct connection ──
             remote = socket.create_connection((dst_host, dst_port), timeout=15)
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             shutdown_event = threading.Event()
@@ -353,6 +334,11 @@ def handle_client(client, china_set, direct_domains, remote_host, remote_port, i
             t2.start()
             t1.join()
             t2.join()
+
+        duration = time.time() - start_ts
+        if log_requests:
+            route = "proxy" if use_proxy else "direct"
+            print(f"[{time.strftime('%H:%M:%S')}] {dst_host}:{dst_port} → {route} ({reason}) {duration:.1f}s")
 
     except (OSError, socket.timeout, ssl.SSLError, ValueError):
         try:
@@ -369,7 +355,6 @@ def handle_client(client, china_set, direct_domains, remote_host, remote_port, i
 
 
 def load_config(config_path: str) -> dict:
-    """Load optional JSON config file."""
     if config_path and os.path.exists(config_path):
         with open(config_path) as f:
             return json.load(f)
@@ -392,6 +377,10 @@ def main():
                         help="Path to config JSON file")
     parser.add_argument("--insecure", "-k", action="store_true",
                         help="Skip TLS certificate verification for remote proxy (default: verify)")
+    parser.add_argument("--log-requests", action="store_true",
+                        help="Log each CONNECT request with target, route and timing")
+    parser.add_argument("--api-port", type=int, default=STATS_API_PORT,
+                        help=f"REST API port for stats (default: {STATS_API_PORT})")
     parser.add_argument("--version", action="store_true",
                         help="Show version and exit")
     args = parser.parse_args()
@@ -400,45 +389,46 @@ def main():
         print(f"Smart Proxy Forwarder v{VERSION}")
         sys.exit(0)
 
-    # Merge config file overrides
     cfg = load_config(args.config)
     remote_host = args.remote_host or cfg.get("remote", {}).get("host", "")
     remote_port = args.remote_port or cfg.get("remote", {}).get("port", 443)
     listen_host = args.listen_host or cfg.get("listen", {}).get("host", "127.0.0.1")
     listen_port = args.listen_port or cfg.get("listen", {}).get("port", 10808)
-
     insecure = args.insecure or cfg.get("insecure", False)
+    log_requests = args.log_requests or cfg.get("log_requests", False)
+    api_port = args.api_port or cfg.get("api_port", STATS_API_PORT)
 
     if not remote_host:
         print("ERROR: --remote-host is required (or set in config file)", file=sys.stderr)
         print("  Example: --remote-host your-proxy.example.com --remote-port 443", file=sys.stderr)
         sys.exit(1)
 
-    # Load China IP set
     china = ChinaIPSet()
     china_url = cfg.get("china_ip_list_url", "")
     china.load_from_url(china_url, CHINALIST_CACHE)
 
-    # Merge custom direct domains from config
     direct_domains = set(DEFAULT_DIRECT_DOMAINS)
     custom_domains = cfg.get("direct_domains", [])
     if custom_domains:
         direct_domains.update(custom_domains)
 
-    # Start server
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((listen_host, listen_port))
     server.listen(100)
 
     print(f"\n{'='*60}")
-    print(f"  Smart Proxy Forwarder")
+    print(f"  Smart Proxy Forwarder v{VERSION}")
     print(f"{'='*60}")
     print(f"  Listen:     {listen_host}:{listen_port}")
     print(f"  Remote:     {remote_host}:{remote_port}")
     print(f"  CN CIDRs:   {len(china._networks)} ranges")
     print(f"  Direct Doms:{len(direct_domains)} rules")
     print(f"  TLS Verify: {'OFF (--insecure)' if insecure else 'ON'}")
+    print(f"  API:        http://127.0.0.1:{api_port}/stats")
+    print(f"  Log reqs:   {'ON' if log_requests else 'OFF'}")
+    print(f"  Stats:      {STATS_FILE}")
+    print(f"  Health:     checking every {HEALTH_CHECK_INTERVAL}s")
     print(f"\n  Set http_proxy=http://{listen_host}:{listen_port}")
     print(f"  Set https_proxy=http://{listen_host}:{listen_port}")
     print(f"\n  CN → Direct | INTL → Proxy (auto, DNS-safe)")
@@ -452,7 +442,7 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    # ── Background: stats writer ──
+    # Stats writer
     def _write_stats():
         while True:
             try:
@@ -461,11 +451,9 @@ def main():
             except OSError:
                 pass
             time.sleep(10)
+    threading.Thread(target=_write_stats, daemon=True).start()
 
-    t_stats = threading.Thread(target=_write_stats, daemon=True)
-    t_stats.start()
-
-    # ── Background: health check ──
+    # Health check
     def _health_check():
         while True:
             try:
@@ -479,12 +467,15 @@ def main():
                     stats.health_status = "dead"
                     stats.health_last_check = time.time()
             time.sleep(HEALTH_CHECK_INTERVAL)
+    threading.Thread(target=_health_check, daemon=True).start()
 
-    t_health = threading.Thread(target=_health_check, daemon=True)
-    t_health.start()
-
-    print("  Stats:      %s" % STATS_FILE)
-    print(f"  Health:     checking every {HEALTH_CHECK_INTERVAL}s")
+    # REST API
+    try:
+        t_api = threading.Thread(target=_start_api_server, args=(api_port,), daemon=True)
+        t_api.start()
+        print(f"  ✓ REST API running on http://127.0.0.1:{api_port}/stats")
+    except Exception as e:
+        print(f"  ⚠ REST API failed to start: {e}")
     print(f"  {'='*60}\n")
 
     while True:
@@ -492,12 +483,50 @@ def main():
             client, addr = server.accept()
             t = threading.Thread(
                 target=handle_client,
-                args=(client, china, direct_domains, remote_host, remote_port, insecure),
+                args=(client, china, direct_domains, remote_host, remote_port, insecure, log_requests),
                 daemon=True,
             )
             t.start()
         except (OSError, ValueError):
-            continue  # log and move on, don't die on one bad accept
+            continue
+
+
+# ── Domain whitelist ──
+DEFAULT_DIRECT_DOMAINS = {
+    "*.baidu.com", "*.qq.com", "*.aliyun.com", "*.taobao.com",
+    "*.jd.com", "*.weixin.qq.com", "*.wechat.com", "*.163.com",
+    "*.sina.com", "*.sohu.com", "*.zhihu.com", "*.bilibili.com",
+    "*.douyin.com", "*.bytedance.com", "*.tencent.com", "*.netease.com",
+    "*.xiaomi.com", "*.huawei.com", "*.ctrip.com", "*.meituan.com",
+    "*.dianping.com", "*.ele.me", "*.58.com", "*.dangdang.com",
+    "*.yhd.com", "*.suning.com", "*.gmw.cn",
+    "*.aliyuncs.com", "*.alibaba.com", "*.cainiao.com",
+    "*.deepseek.com", "api.deepseek.com",
+    "*.people.com.cn", "*.xinhuanet.com", "*.cctv.com",
+    "*.chinanews.com", "*.thepaper.cn", "*.yicai.com",
+    "*.cnstock.com", "*.eastmoney.com", "*.10jqka.com",
+    "*.cls.cn", "*.wallstreetcn.com",
+    "*.csdn.net", "*.oschina.net", "*.cnblogs.com",
+    "*.36kr.com", "*.huxiu.com", "*.geekpark.net",
+    "*.ustc.edu.cn", "*.tuna.tsinghua.edu.cn", "*.aliyun.com",
+    "*.kernel.org", "*.pypi.org", "*.python.org",
+    "*.npmjs.org", "*.rubygems.org",
+    "localhost", "127.0.0.1", "::1",
+}
+
+CHINA_CIDRS = [
+    "1.0.0.0/8", "14.0.0.0/8", "27.0.0.0/8", "36.0.0.0/8",
+    "39.0.0.0/8", "42.0.0.0/8", "49.0.0.0/8", "58.0.0.0/8",
+    "59.0.0.0/8", "60.0.0.0/8", "61.0.0.0/8", "101.0.0.0/8",
+    "103.0.0.0/8", "106.0.0.0/8", "110.0.0.0/8", "111.0.0.0/8",
+    "112.0.0.0/8", "113.0.0.0/8", "114.0.0.0/8", "115.0.0.0/8",
+    "116.0.0.0/8", "117.0.0.0/8", "118.0.0.0/8", "119.0.0.0/8",
+    "120.0.0.0/8", "121.0.0.0/8", "122.0.0.0/8", "123.0.0.0/8",
+    "124.0.0.0/8", "125.0.0.0/8", "169.254.0.0/16", "180.0.0.0/8",
+    "182.0.0.0/8", "183.0.0.0/8", "202.0.0.0/8", "203.0.0.0/8",
+    "210.0.0.0/8", "211.0.0.0/8", "218.0.0.0/8", "219.0.0.0/8",
+    "220.0.0.0/8", "221.0.0.0/8", "222.0.0.0/8", "223.0.0.0/8",
+]
 
 
 if __name__ == "__main__":
