@@ -47,7 +47,7 @@ DEFAULT_DIRECT_DOMAINS = {
     "*.csdn.net", "*.oschina.net", "*.cnblogs.com",
     "*.36kr.com", "*.huxiu.com", "*.geekpark.net",
     # OS / package mirrors
-    "*.ustc.edu.cn", "*.tuna.tsinghua.edu.cn", "aliyun.com",
+    "*.ustc.edu.cn", "*.tuna.tsinghua.edu.cn", "*.aliyun.com",
     "*.kernel.org", "*.pypi.org", "*.python.org",
     "*.npmjs.org", "*.rubygems.org",
     # Local
@@ -173,10 +173,11 @@ def relay_traffic(src, dst, shutdown_event):
     """Bidirectional traffic relay with idle timeout.
 
     Uses shutdown_event to signal the paired relay to stop when one direction closes.
+    Checks shutdown_event every 15 seconds instead of waiting for the full idle timeout.
     """
     try:
-        src.settimeout(RELAY_IDLE_TIMEOUT)
-        dst.settimeout(RELAY_IDLE_TIMEOUT)
+        src.settimeout(15)
+        dst.settimeout(15)
         while not shutdown_event.is_set():
             data = src.recv(BUFSIZE)
             if not data:

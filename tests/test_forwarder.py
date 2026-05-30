@@ -122,6 +122,7 @@ class TestDefaultDomains(unittest.TestCase):
         self.assertIn("baidu.com", combined)
         self.assertIn("deepseek.com", combined)
         self.assertIn("weixin.qq.com", combined)
+        self.assertIn("aliyun.com", combined)
 
 
 class TestVersion(unittest.TestCase):
