@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.2 (2026-05-30)
+
+### Added
+- Web dashboard (`http://127.0.0.1:10809/`) — live status page, refreshes every 5s
+- Multi-upstream failover — comma-separated `--remote-host "a.com,b.com"`
+- TLS connection pool (`--pool-size`) — reuses connections, reduces handshake latency
+- SOCKS5 upstream support (`--upstream-type socks5`)
+- Bilingual dashboard (Chinese / English toggle)
+- `proxy-manager.sh logs` command — quick log viewing
+
+### Changed
+- Dashboard shows upstream type, pool size, active upstream
+- Stats JSON includes `upstream_type` and `pool_size` fields
+
+### Fixed
+- Connection pool no longer returns consumed connections to pool
+- Pool acquire uses `getpeername()` instead of sending test data
+- All tests pass without ResourceWarning
+
 ## v1.1 (2026-05-30)
 
 ### Added
