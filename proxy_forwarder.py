@@ -8,6 +8,7 @@ International targets → forward via remote HTTPS CONNECT proxy
 DNS leak-free: routing decisions never trigger local DNS lookups.
 """
 import argparse
+import dataclasses
 import ipaddress
 import json
 import os
@@ -16,6 +17,7 @@ import socket
 import ssl
 import sys
 import threading
+import time
 import urllib.request
 
 VERSION = "1.0.0"
@@ -23,6 +25,47 @@ VERSION = "1.0.0"
 BUFSIZE = 65536
 CHINALIST_CACHE = "/tmp/proxy_china_ip_list.txt"
 RELAY_IDLE_TIMEOUT = 300  # reap idle connections after 5 min
+STATS_FILE = "/tmp/proxy-forwarder-stats.json"
+HEALTH_CHECK_INTERVAL = 30  # seconds between proxy health checks
+
+
+@dataclasses.dataclass
+class ProxyStats:
+    """Thread-safe connection statistics."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.total_connections = 0
+        self.active_connections = 0
+        self.bytes_sent = 0
+        self.bytes_recv = 0
+        self.start_time = time.time()
+        self.health_status = "unknown"
+        self.health_last_check = 0.0
+
+    def to_dict(self):
+        uptime = time.time() - self.start_time
+        with self.lock:
+            return {
+                "version": VERSION,
+                "uptime_seconds": int(uptime),
+                "uptime": self._format_uptime(uptime),
+                "total_connections": self.total_connections,
+                "active_connections": self.active_connections,
+                "bytes_sent": self.bytes_sent,
+                "bytes_recv": self.bytes_recv,
+                "bytes_total": self.bytes_sent + self.bytes_recv,
+                "health": self.health_status,
+                "health_last_check": self.health_last_check,
+            }
+
+    @staticmethod
+    def _format_uptime(seconds):
+        h, r = divmod(int(seconds), 3600)
+        m, s = divmod(r, 60)
+        return f"{h}h{m:02d}m{s:02d}s"
+
+
+stats = ProxyStats()
 
 # Default direct-connect domains (bypass proxy, no DNS needed)
 DEFAULT_DIRECT_DOMAINS = {
@@ -169,31 +212,32 @@ def is_ip_string(host: str) -> bool:
         return False
 
 
-def relay_traffic(src, dst, shutdown_event):
+def relay_traffic(src, dst, shutdown_event, bytes_counter=None):
     """Bidirectional traffic relay with idle timeout.
 
     Uses shutdown_event to signal the paired relay to stop when one direction closes.
     Polls for shutdown_event every second while waiting for data.
     """
+    total = 0
     try:
         src.settimeout(RELAY_IDLE_TIMEOUT)
         dst.settimeout(RELAY_IDLE_TIMEOUT)
         while not shutdown_event.is_set():
-            # Short timeout so we can check shutdown_event regularly
             src.settimeout(1.0)
             try:
                 data = src.recv(BUFSIZE)
                 if not data:
                     break
                 dst.sendall(data)
+                total += len(data)
             except socket.timeout:
-                continue  # timeout is normal, re-check shutdown_event
+                continue
     except socket.timeout:
-        pass  # idle timeout — normal
+        pass
     except OSError:
-        pass  # connection closed
+        pass
     except Exception:
-        pass  # safety net
+        pass
     finally:
         shutdown_event.set()
         for s in (src, dst):
@@ -201,10 +245,24 @@ def relay_traffic(src, dst, shutdown_event):
                 s.close()
             except OSError:
                 pass
+        if bytes_counter:
+            bytes_counter(total)
+        return total
+
+
+def _make_byte_counter(attr):
+    """Create a bytes counter callback for a given stats attribute."""
+    def _cb(n):
+        with stats.lock:
+            setattr(stats, attr, getattr(stats, attr) + n)
+    return _cb
 
 
 def handle_client(client, china_set, direct_domains, remote_host, remote_port, insecure=False):
     """Handle one CONNECT request — route domestic direct, international via proxy."""
+    with stats.lock:
+        stats.total_connections += 1
+        stats.active_connections += 1
     try:
         data = client.recv(BUFSIZE)
         if not data:
@@ -276,8 +334,10 @@ def handle_client(client, china_set, direct_domains, remote_host, remote_port, i
 
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             shutdown_event = threading.Event()
-            t1 = threading.Thread(target=relay_traffic, args=(client, tls_remote, shutdown_event), daemon=True)
-            t2 = threading.Thread(target=relay_traffic, args=(tls_remote, client, shutdown_event), daemon=True)
+            t1 = threading.Thread(target=relay_traffic, args=(client, tls_remote, shutdown_event,
+                _make_byte_counter('bytes_recv')), daemon=True)
+            t2 = threading.Thread(target=relay_traffic, args=(tls_remote, client, shutdown_event,
+                _make_byte_counter('bytes_sent')), daemon=True)
             t1.start()
             t2.start()
             t1.join()
@@ -304,6 +364,8 @@ def handle_client(client, china_set, direct_domains, remote_host, remote_port, i
             client.close()
         except OSError:
             pass
+        with stats.lock:
+            stats.active_connections -= 1
 
 
 def load_config(config_path: str) -> dict:
@@ -389,6 +451,41 @@ def main():
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
+
+    # ── Background: stats writer ──
+    def _write_stats():
+        while True:
+            try:
+                with open(STATS_FILE, "w") as f:
+                    json.dump(stats.to_dict(), f)
+            except OSError:
+                pass
+            time.sleep(10)
+
+    t_stats = threading.Thread(target=_write_stats, daemon=True)
+    t_stats.start()
+
+    # ── Background: health check ──
+    def _health_check():
+        while True:
+            try:
+                s = socket.create_connection((remote_host, remote_port), timeout=10)
+                s.close()
+                with stats.lock:
+                    stats.health_status = "alive"
+                    stats.health_last_check = time.time()
+            except Exception:
+                with stats.lock:
+                    stats.health_status = "dead"
+                    stats.health_last_check = time.time()
+            time.sleep(HEALTH_CHECK_INTERVAL)
+
+    t_health = threading.Thread(target=_health_check, daemon=True)
+    t_health.start()
+
+    print("  Stats:      %s" % STATS_FILE)
+    print(f"  Health:     checking every {HEALTH_CHECK_INTERVAL}s")
+    print(f"  {'='*60}\n")
 
     while True:
         try:

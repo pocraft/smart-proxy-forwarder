@@ -74,11 +74,25 @@ status() {
         local rss=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
         local mem=$((rss / 1024))
         echo "  Running"
-        echo "   PID:   $pid"
-        echo "   Port:  $PORT"
-        echo "   RAM:   ${mem}MB"
-        echo "   Log:   $LOG_FILE"
-        echo "   Conf:  $CONFIG_FILE"
+        echo "   PID:      $pid"
+        echo "   Port:     $PORT"
+        echo "   RAM:      ${mem}MB"
+        echo "   Log:      $LOG_FILE"
+        echo "   Conf:     $CONFIG_FILE"
+        # Show stats from stats file
+        if [ -f "/tmp/proxy-forwarder-stats.json" ]; then
+            python3 -c "
+import json
+with open('/tmp/proxy-forwarder-stats.json') as f:
+    s = json.load(f)
+print(f'   Uptime:   {s[\"uptime\"]}')
+print(f'   Conns:    {s[\"total_connections\"]} total, {s[\"active_connections\"]} active')
+print(f'   Traffic:  {s[\"bytes_total\"]/1024:.0f} KB ({s[\"bytes_recv\"]/1024:.0f} KB ↓ / {s[\"bytes_sent\"]/1024:.0f} KB ↑)')
+health = s['health']
+icon = '✅' if health == 'alive' else ('❌' if health == 'dead' else '❓')
+print(f'   Health:   {icon} {health}')
+" 2>/dev/null
+        fi
     else
         echo "  Stopped"
     fi
