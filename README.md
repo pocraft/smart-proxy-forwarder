@@ -2,8 +2,8 @@
 
 > **安全提示：** TLS 证书验证默认开启。如果代理服务器使用自签名证书，请加 `--insecure` 参数。
 
-[![PyPI](https://img.shields.io/pypi/v/smart-proxy-forwarder)](https://pypi.org/project/smart-proxy-forwarder/)
-[![Python](https://img.shields.io/pypi/pyversions/smart-proxy-forwarder)](https://pypi.org/project/smart-proxy-forwarder/)
+[![GitHub Release](https://img.shields.io/github/v/release/601494530-create/smart-proxy-forwarder)](https://github.com/601494530-create/smart-proxy-forwarder/releases)
+[![Python](https://img.shields.io/badge/python-3.8+-blue)](https://github.com/601494530-create/smart-proxy-forwarder)
 [![License](https://img.shields.io/github/license/601494530-create/smart-proxy-forwarder)](LICENSE)
 [![CI](https://github.com/601494530-create/smart-proxy-forwarder/actions/workflows/ci.yml/badge.svg)](https://github.com/601494530-create/smart-proxy-forwarder/actions)
 
