@@ -2,6 +2,11 @@
 
 > **安全提示：** TLS 证书验证默认开启。如果代理服务器使用自签名证书，请加 `--insecure` 参数。
 
+[![PyPI](https://img.shields.io/pypi/v/smart-proxy-forwarder)](https://pypi.org/project/smart-proxy-forwarder/)
+[![Python](https://img.shields.io/pypi/pyversions/smart-proxy-forwarder)](https://pypi.org/project/smart-proxy-forwarder/)
+[![License](https://img.shields.io/github/license/601494530-create/smart-proxy-forwarder)](LICENSE)
+[![CI](https://github.com/601494530-create/smart-proxy-forwarder/actions/workflows/ci.yml/badge.svg)](https://github.com/601494530-create/smart-proxy-forwarder/actions)
+
 轻量级 DNS 防泄漏 CONNECT 代理转发器。**国内直连、国际走远程 HTTPS 代理**，自动分流。
 
 专为 WSL 用户设计——你在 Chrome 里用 VPN 插件/代理能翻墙，但 WSL 终端里的 curl、git、npm、Python、AI agent 等工具也能享受同样的能力，**且不泄漏 DNS 查询**。

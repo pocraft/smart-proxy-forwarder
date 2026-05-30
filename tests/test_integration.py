@@ -172,17 +172,15 @@ class TestAPIServerStart(unittest.TestCase):
     """Test that API server can start on a random port."""
 
     def test_api_server_starts_and_serves(self):
-        import http.server
-        from http.server import HTTPServer
+        import socket
 
         # Find a free port
-        import socket
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-        s.close()
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
 
         # Start server in thread
+        from http.server import HTTPServer
         server = HTTPServer(("127.0.0.1", port), pf.StatsHandler)
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
