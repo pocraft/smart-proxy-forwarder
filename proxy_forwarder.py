@@ -34,6 +34,7 @@ HEALTH_CHECK_INTERVAL = 30
 STATS_API_PORT = 10809
 POOL_SIZE = 4
 POOL_MAX_AGE = 300  # recycle connections after 5 min
+UPSTREAM_TYPE = "connect"  # "connect" or "socks5"
 
 
 @dataclasses.dataclass
@@ -65,6 +66,7 @@ class ProxyStats:
                 "health": self.health_status,
                 "health_last_check": self.health_last_check,
                 "active_upstream": self.active_upstream,
+                "upstream_type": UPSTREAM_TYPE,
                 "pool_size": POOL_SIZE,
             }
 
@@ -187,11 +189,11 @@ table{width:100%;border-collapse:collapse}td{padding:8px 0;border-bottom:1px sol
 const L={zh:{
 title:'🔄 代理转发器',load:'加载中...',status:'状态',alive:'正常',dead:'离线',unknown:'未知',
 uptime:'运行时长',conn:'连接数',connFmt:(t,a)=>t+' 总 / '+a+' 活跃',
-traffic:'流量',upstream:'上游',pool:'池大小',ver:'版本'
+traffic:'流量',upstream:'上游',type:'类型',pool:'池大小',ver:'版本'
 },en:{
 title:'🔄 Proxy Forwarder',load:'Loading...',status:'Status',alive:'Alive',dead:'Dead',unknown:'Unknown',
 uptime:'Uptime',conn:'Connections',connFmt:(t,a)=>t+' total, '+a+' active',
-traffic:'Traffic',upstream:'Upstream',pool:'Pool Size',ver:'Version'
+traffic:'Traffic',upstream:'Upstream',type:'Type',pool:'Pool Size',ver:'Version'
 }};
 let lang='zh';
 function setLang(l){lang=l;
@@ -205,6 +207,7 @@ h+=`<tr><td>${t.uptime}</td><td class="val">${d.uptime}</td></tr>`;
 h+=`<tr><td>${t.conn}</td><td class="val">${t.connFmt(d.total_connections,d.active_connections)}</td></tr>`;
 h+=`<tr><td>${t.traffic}</td><td class="val">${(d.bytes_total/1024).toFixed(0)} KB</td></tr>`;
 h+=`<tr><td>${t.upstream}</td><td class="val">${d.active_upstream||'-'}</td></tr>`;
+h+=`<tr><td>${t.type}</td><td class="val">${d.upstream_type||'-'}</td></tr>`;
 h+=`<tr><td>${t.pool}</td><td class="val">${d.pool_size||'-'}</td></tr>`;
 h+=`<tr><td>${t.ver}</td><td class="val">${d.version}</td></tr></table>`;
 document.getElementById('root').innerHTML=h}
@@ -360,6 +363,27 @@ def is_ip_string(host: str) -> bool:
 
 # ── Traffic relay ──
 
+def socks5_connect(sock, host: str, port: int) -> bool:
+    """Perform SOCKS5 handshake over an established TCP connection.
+    Returns True on success, False on failure."""
+    try:
+        # Auth negotiation: version=5, 1 method, method=no-auth(0)
+        sock.sendall(bytes([5, 1, 0]))
+        resp = sock.recv(2)
+        if resp != bytes([5, 0]):
+            return False
+
+        # CONNECT: version=5, cmd=connect(1), rsv=0, atyp=domain(3)
+        host_b = host.encode()
+        msg = bytes([5, 1, 0, 3, len(host_b)]) + host_b + port.to_bytes(2, "big")
+        sock.sendall(msg)
+        resp = sock.recv(10)
+        if len(resp) < 2 or resp[1] != 0:
+            return False
+        return True
+    except OSError:
+        return False
+
 def relay_traffic(src, dst, shutdown_event, bytes_counter=None):
     total = 0
     try:
@@ -403,7 +427,7 @@ def _make_byte_counter(attr):
 # ── Connection handler ──
 
 def handle_client(client, china_set, direct_domains, upstreams,
-                  insecure=False, log_requests=False):
+                  insecure=False, log_requests=False, upstream_type="connect"):
     """Handle one CONNECT request with multi-upstream + connection pool support."""
     start_ts = time.time()
     with stats.lock:
@@ -456,49 +480,65 @@ def handle_client(client, china_set, direct_domains, upstreams,
             with stats.lock:
                 stats.active_upstream = f"{remote_host}:{remote_port}"
 
-            # Try pre-warmed pool first, fall back to fresh connection.
-            # Note: after a TLS connection is used for a CONNECT tunnel,
-            # it is consumed and cannot be reused. Pool is only for pre-warming.
-            tls_remote = pool.acquire(remote_host, remote_port)
-            if tls_remote is None:
-                tls_remote = pool.new_connection(remote_host, remote_port).tls
-
-            try:
-                tls_remote.sendall(
-                    f"CONNECT {dst_host}:{dst_port} HTTP/1.1\r\n"
-                    f"Host: {dst_host}:{dst_port}\r\n\r\n".encode()
-                )
-                resp = tls_remote.recv(BUFSIZE)
-                if b"200" not in resp:
+            if upstream_type == "socks5":
+                # ── SOCKS5 upstream: plain TCP + SOCKS5 handshake ──
+                remote = socket.create_connection((remote_host, remote_port), timeout=15)
+                if not socks5_connect(remote, dst_host, dst_port):
                     client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                    remote.close()
                     return
-            except OSError:
-                # Connection dead, retry with fresh one
+                client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                shutdown_event = threading.Event()
+                t1 = threading.Thread(target=relay_traffic, args=(
+                    client, remote, shutdown_event, _make_byte_counter('bytes_recv')), daemon=True)
+                t2 = threading.Thread(target=relay_traffic, args=(
+                    remote, client, shutdown_event, _make_byte_counter('bytes_sent')), daemon=True)
+                t1.start()
+                t2.start()
+                t1.join()
+                t2.join()
+            else:
+                # ── HTTPS CONNECT upstream: TLS + CONNECT request ──
+                tls_remote = pool.acquire(remote_host, remote_port)
+                if tls_remote is None:
+                    tls_remote = pool.new_connection(remote_host, remote_port).tls
+
                 try:
-                    tls_remote.close()
+                    tls_remote.sendall(
+                        f"CONNECT {dst_host}:{dst_port} HTTP/1.1\r\n"
+                        f"Host: {dst_host}:{dst_port}\r\n\r\n".encode()
+                    )
+                    resp = tls_remote.recv(BUFSIZE)
+                    if b"200" not in resp:
+                        client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                        return
                 except OSError:
-                    pass
-                tls_remote = pool.new_connection(remote_host, remote_port).tls
-                tls_remote.sendall(
-                    f"CONNECT {dst_host}:{dst_port} HTTP/1.1\r\n"
-                    f"Host: {dst_host}:{dst_port}\r\n\r\n".encode()
-                )
-                resp = tls_remote.recv(BUFSIZE)
-                if b"200" not in resp:
-                    client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
-                    return
+                    # Connection dead, retry with fresh one
+                    try:
+                        tls_remote.close()
+                    except OSError:
+                        pass
+                    tls_remote = pool.new_connection(remote_host, remote_port).tls
+                    tls_remote.sendall(
+                        f"CONNECT {dst_host}:{dst_port} HTTP/1.1\r\n"
+                        f"Host: {dst_host}:{dst_port}\r\n\r\n".encode()
+                    )
+                    resp = tls_remote.recv(BUFSIZE)
+                    if b"200" not in resp:
+                        client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                        return
 
-            client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            shutdown_event = threading.Event()
-            t1 = threading.Thread(target=relay_traffic, args=(
-                client, tls_remote, shutdown_event, _make_byte_counter('bytes_recv')), daemon=True)
-            t2 = threading.Thread(target=relay_traffic, args=(
-                tls_remote, client, shutdown_event, _make_byte_counter('bytes_sent')), daemon=True)
-            t1.start()
-            t2.start()
-            t1.join()
-            t2.join()
-            # Connection is consumed after tunnel closes — NOT returned to pool.
+                client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                shutdown_event = threading.Event()
+                t1 = threading.Thread(target=relay_traffic, args=(
+                    client, tls_remote, shutdown_event, _make_byte_counter('bytes_recv')), daemon=True)
+                t2 = threading.Thread(target=relay_traffic, args=(
+                    tls_remote, client, shutdown_event, _make_byte_counter('bytes_sent')), daemon=True)
+                t1.start()
+                t2.start()
+                t1.join()
+                t2.join()
+                # Connection is consumed after tunnel closes — NOT returned to pool.
         else:
             remote = socket.create_connection((dst_host, dst_port), timeout=15)
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -552,6 +592,9 @@ def main():
     parser.add_argument("--api-port", type=int, default=STATS_API_PORT)
     parser.add_argument("--pool-size", type=int, default=POOL_SIZE,
                         help="TLS connection pool size (default: 4)")
+    parser.add_argument("--upstream-type", default="connect",
+                        choices=["connect", "socks5"],
+                        help="Upstream proxy type: connect (HTTPS CONNECT) or socks5 (default: connect)")
     parser.add_argument("--version", action="store_true")
     args = parser.parse_args()
 
@@ -568,6 +611,12 @@ def main():
     log_requests = args.log_requests or cfg.get("log_requests", False)
     api_port = args.api_port or cfg.get("api_port", STATS_API_PORT)
     pool_size = args.pool_size or cfg.get("pool_size", POOL_SIZE)
+    upstream_type = args.upstream_type or cfg.get("upstream_type", "connect")
+
+    if upstream_type not in ("connect", "socks5"):
+        upstream_type = "connect"
+    global UPSTREAM_TYPE
+    UPSTREAM_TYPE = upstream_type
 
     if not remote_host:
         print("ERROR: --remote-host is required (or set in config file)", file=sys.stderr)
@@ -596,9 +645,9 @@ def main():
     print(f"  Smart Proxy Forwarder v{VERSION}")
     print(f"{'='*60}")
     print(f"  Listen:     {listen_host}:{listen_port}")
-    print(f"  Upstreams:  {len(upstreams)} server(s)")
+    print(f"  Upstream:   {len(upstreams)} server(s)")
     for h, p in upstreams:
-        print(f"               {h}:{p}")
+        print(f"               {h}:{p} ({upstream_type})")
     print(f"  CN CIDRs:   {len(china._networks)} ranges")
     print(f"  Direct Doms:{len(direct_domains)} rules")
     print(f"  TLS Verify: {'OFF (--insecure)' if insecure else 'ON'}")
@@ -663,7 +712,7 @@ def main():
             client, addr = server.accept()
             t = threading.Thread(
                 target=handle_client,
-                args=(client, china, direct_domains, upstreams, insecure, log_requests),
+                args=(client, china, direct_domains, upstreams, insecure, log_requests, upstream_type),
                 daemon=True,
             )
             t.start()

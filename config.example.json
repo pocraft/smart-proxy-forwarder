@@ -14,6 +14,7 @@
   },
 
   "insecure": false,
+  "upstream_type": "connect",
 
   "china_ip_list_url": "",
 
