@@ -80,25 +80,46 @@ class ChinaIPSet:
 
     def load_from_url(self, url: str, cache_path: str):
         """Download China IP list from URL, fall back to built-in."""
+        # Temporary list: replace self._networks only on success
+        new_networks = []
+        loaded = False
+
         if url:
             try:
                 print(f"[+] Downloading China IP list: {url}")
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     data = resp.read().decode("utf-8")
-                    with open(cache_path, "w") as f:
-                        f.write(data)
-                    self._load_lines(data.splitlines())
+                    # Save to cache
+                    try:
+                        with open(cache_path, "w") as f:
+                            f.write(data)
+                    except OSError:
+                        pass
+                    lines = data.splitlines()
+                    for line in lines:
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            try:
+                                new_networks.append(ipaddress.ip_network(line, strict=False))
+                            except ValueError:
+                                pass
+                    if new_networks:
+                        self._networks = new_networks
+                        loaded = True
                     print(f"[+] Loaded {len(self._networks)} CIDR ranges")
                     return
-            except Exception as e:
+            except Exception:
                 if os.path.exists(cache_path):
                     self._load_file(cache_path)
                     return
 
-        if os.path.exists(cache_path):
+        if not loaded and os.path.exists(cache_path):
             self._load_file(cache_path)
-        else:
+            loaded = True
+
+        if not loaded:
+            # Keep the built-in CIDRs from __init__
             print(f"[+] Using built-in China IP ranges ({len(self._networks)} CIDRs)")
 
     def _load_file(self, path: str):

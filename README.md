@@ -50,6 +50,9 @@ cd smart-proxy-forwarder
 # 2. 一键安装（填你的代理服务器地址）
 bash setup.sh your-proxy.example.com 443
 
+# 2a. 如果代理使用自签名证书，加第三个参数：
+bash setup.sh your-proxy.example.com 443 true
+
 # 3. 重新打开终端或执行 source
 source ~/.bashrc
 

@@ -32,8 +32,12 @@ start() {
         nohup python3 -u "$HOME/.hermes/scripts/proxy_forwarder.py" \
             --config "$CONFIG_FILE" > "$LOG_FILE" 2>&1 &
     else
-        nohup python3 -u "$HOME/.hermes/scripts/proxy_forwarder.py" \
-            --listen-port "$PORT" > "$LOG_FILE" 2>&1 &
+        echo "  ⚠ No config file found at $CONFIG_FILE"
+        echo "  Run setup.sh first, or create the config manually:"
+        echo "    bash setup.sh your-proxy.example.com 443"
+        echo "    # or:"
+        echo "    python3 $HOME/.hermes/scripts/proxy_forwarder.py --remote-host your-proxy.example.com"
+        return 1
     fi
     local new_pid=$!
 

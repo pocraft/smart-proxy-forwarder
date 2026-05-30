@@ -35,8 +35,8 @@ if [ $# -ge 1 ]; then
     echo "  Using: $REMOTE_HOST:$REMOTE_PORT"
 else
     echo "  ⚠ No proxy host provided."
-    echo "  Usage: bash setup.sh <remote-host> [remote-port]"
-    echo "  Example: bash setup.sh your-proxy.example.com 443"
+    echo "  Usage: bash setup.sh <remote-host> [remote-port] [insecure]"
+    echo "  Example: bash setup.sh your-proxy.example.com 443 true"
     echo ""
     echo "  Setup will continue without a proxy server."
     echo "  You can set it later by editing:"
@@ -44,13 +44,15 @@ else
 fi
 
 # Save config (allow empty host — forwarder will fail with clear message)
+INSECURE="${3:-false}"
 cat > "$HOME/.hermes/scripts/proxy-config.json" << CONFIGEOF
 {
   "remote": { "host": "$REMOTE_HOST", "port": $REMOTE_PORT },
-  "listen": { "host": "127.0.0.1", "port": 10808 }
+  "listen": { "host": "127.0.0.1", "port": 10808 },
+  "insecure": $INSECURE
 }
 CONFIGEOF
-echo "  Config saved to ~/.hermes/scripts/proxy-config.json"
+echo "  Config saved to ~/.hermes/scripts/proxy-config.json (insecure: $INSECURE)"
 
 # ── 3. Add bash integration ──
 echo ""
