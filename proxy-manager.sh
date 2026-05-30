@@ -104,5 +104,14 @@ case "${1:-status}" in
     restart) stop; sleep 1; start ;;
     status) status ;;
     logs) tail -50 "$LOG_FILE" 2>/dev/null || echo "No log file at $LOG_FILE" ;;
-    *) echo "Usage: $0 {start|stop|restart|status|logs}" ;;
+    export) cat "$CONFIG_FILE" 2>/dev/null || echo "No config file at $CONFIG_FILE" ;;
+    import)
+        if [ -z "$2" ]; then echo "Usage: $0 import <path-to-config.json>"; exit 1; fi
+        if [ ! -f "$2" ]; then echo "File not found: $2"; exit 1; fi
+        mkdir -p "$CONFIG_DIR"
+        cp "$2" "$CONFIG_FILE"
+        echo "Config imported from $2"
+        echo "Run '$0 restart' to apply"
+        ;;
+    *) echo "Usage: $0 {start|stop|restart|status|logs|export|import}" ;;
 esac

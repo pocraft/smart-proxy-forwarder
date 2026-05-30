@@ -35,6 +35,42 @@ STATS_API_PORT = 10809
 POOL_SIZE = 4
 POOL_MAX_AGE = 300  # recycle connections after 5 min
 UPSTREAM_TYPE = "connect"  # "connect" or "socks5"
+REPO_URL = "https://api.github.com/repos/601494530-create/smart-proxy-forwarder/releases/latest"
+
+
+def check_update() -> str:
+    """Check GitHub for latest release. Returns update message or empty string."""
+    try:
+        req = urllib.request.Request(REPO_URL, headers={"User-Agent": "proxy-forwarder", "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            latest = data.get("tag_name", "").lstrip("v")
+            if latest and latest > VERSION:
+                return f"  Update available: v{VERSION} → v{latest} (https://github.com/601494530-create/smart-proxy-forwarder/releases)"
+    except Exception:
+        pass
+    return ""
+
+
+def validate_config(cfg: dict) -> list:
+    """Validate config and return list of warnings/errors."""
+    errors = []
+    remote = cfg.get("remote", {})
+    if remote.get("host") == "":
+        errors.append("  ⚠ remote.host is empty")
+    port = remote.get("port", 443)
+    if not isinstance(port, int) or port < 1 or port > 65535:
+        errors.append(f"  ⚠ remote.port should be 1-65535, got {port}")
+    listen = cfg.get("listen", {})
+    lport = listen.get("port", 10808)
+    if not isinstance(lport, int) or lport < 1 or lport > 65535:
+        errors.append(f"  ⚠ listen.port should be 1-65535, got {lport}")
+    ut = cfg.get("upstream_type", "connect")
+    if ut not in ("connect", "socks5"):
+        errors.append(f"  ⚠ upstream_type should be 'connect' or 'socks5', got '{ut}'")
+    if cfg.get("insecure", False):
+        errors.append("  ⚠ TLS verification disabled (--insecure)")
+    return errors
 
 
 @dataclasses.dataclass
@@ -596,10 +632,36 @@ def main():
                         choices=["connect", "socks5"],
                         help="Upstream proxy type: connect (HTTPS CONNECT) or socks5 (default: connect)")
     parser.add_argument("--version", action="store_true")
+    parser.add_argument("--check-update", action="store_true",
+                        help="Check GitHub for newer version and exit")
+    parser.epilog = """Examples:
+  # Basic HTTPS CONNECT proxy
+  proxy_forwarder.py --remote-host your-proxy.com --remote-port 443
+
+  # SOCKS5 upstream
+  proxy_forwarder.py --upstream-type socks5 --remote-host 127.0.0.1 --remote-port 1080
+
+  # Multi-upstream failover (comma-separated)
+  proxy_forwarder.py --remote-host "hk-proxy.com:443,jp-proxy.com:8443"
+
+  # With dashboard + request logging + connection pool
+  proxy_forwarder.py --remote-host your-proxy.com --log-requests --api-port 10809 --pool-size 8
+
+  # Validate config file
+  proxy_forwarder.py --config config.json
+"""
     args = parser.parse_args()
 
     if args.version:
         print(f"Smart Proxy Forwarder v{VERSION}")
+        sys.exit(0)
+
+    if args.check_update:
+        msg = check_update()
+        if msg:
+            print(msg)
+        else:
+            print(f"  You're up to date (v{VERSION})")
         sys.exit(0)
 
     cfg = load_config(args.config)
@@ -617,6 +679,20 @@ def main():
         upstream_type = "connect"
     global UPSTREAM_TYPE
     UPSTREAM_TYPE = upstream_type
+
+    # Validate config
+    if args.config:
+        cfg_errors = validate_config(cfg)
+        for err in cfg_errors:
+            print(err, file=sys.stderr)
+
+    # Check update (non-blocking, background)
+    def _check_update_bg():
+        msg = check_update()
+        if msg:
+            print(msg)
+
+    threading.Thread(target=_check_update_bg, daemon=True).start()
 
     if not remote_host:
         print("ERROR: --remote-host is required (or set in config file)", file=sys.stderr)
