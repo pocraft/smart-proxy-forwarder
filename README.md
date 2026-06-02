@@ -20,14 +20,19 @@
 | 功能 | 说明 |
 |------|------|
 | ✅ **智能分流** | 域名白名单直连 / IP 查归属 / 其余默认走代理 |
-| ✅ **双上游协议** | HTTPS CONNECT（默认） + **SOCKS5**（新增） |
+| ✅ **双上游协议** | HTTPS CONNECT（默认） + **SOCKS5** |
 | ✅ **多上游/主备** | 逗号分隔多个代理，随机切换，一个挂了不影响 |
+| ✅ **FanVPN 自动跟随** | 自动检测 Chrome 插件节点切换，15 秒内跟随 |
 | ✅ **TLS 连接池** | 预建立 TLS 连接，减少握手延迟 |
 | ✅ **Web 仪表盘** | `http://127.0.0.1:10809/` 实时状态，中英文切换 |
 | ✅ **REST API** | `/stats` 返回 JSON，可对接监控系统 |
+| ✅ **MCP 服务器** | 6 个 AI agent 管理工具（status/start/stop/restart/stats/logs） |
 | ✅ **请求日志** | `--log-requests` 记录每次连接目标、路由、耗时 |
-| ✅ **健康检查** | 每 30 秒检测上游代理，状态显示在仪表盘 |
+| ✅ **健康检查** | 每 30 秒真实测试代理功能，非仅 TCP 端口 |
 | ✅ **连接统计** | 总连接数、活跃连接数、上下行流量、运行时长 |
+| ✅ **自动更新检测** | `--check-update` 对比 GitHub release |
+| ✅ **配置验证** | 启动时自动校验 config.json 字段合法性 |
+| ✅ **配置备份** | `proxy-manager.sh export/import` |
 | ✅ **DNS 防泄漏** | 路由判定从不本地解析域名 |
 | ✅ **一键安装** | `bash setup.sh your-proxy.com 443` |
 | ✅ **Docker + systemd** | 容器部署 + 系统服务管理 |
@@ -164,6 +169,8 @@ npm config set https-proxy http://127.0.0.1:10808
 | `--insecure` / `-k` | `false` | 跳过 TLS 证书验证 |
 | `--log-requests` | `false` | 记录每次 CONNECT 请求 |
 | `--api-port` | `10809` | REST API / 仪表盘端口 |
+| `--check-update` | - | 检查 GitHub 是否有新版本 |
+| `--auto-detect-fanvpn` | `false` | 自动跟随 Chrome FanVPN 节点切换 |
 | `--version` | - | 显示版本号 |
 
 ### 环境变量
@@ -186,6 +193,7 @@ npm config set https-proxy http://127.0.0.1:10808
   "upstream_type": "connect",
   "pool_size": 4,
   "log_requests": false,
+  "auto_detect_fanvpn": false,
   "china_ip_list_url": "",
   "direct_domains": ["*.my-corp.com"],
   "api_port": 10809
@@ -360,12 +368,13 @@ sudo systemctl status proxy-forwarder
 
 | 文件 | 说明 |
 |------|------|
-| `proxy_forwarder.py` | 核心转发器（762 行，纯 Python 标准库） |
-| `proxy-manager.sh` | 管理脚本（status/logs/start/stop/restart） |
+| `proxy_forwarder.py` | 核心转发器（979 行，纯 Python 标准库） |
+| `proxy-manager.sh` | 管理脚本（status/logs/start/stop/restart/export/import） |
 | `setup.sh` | 一键安装脚本 |
 | `bash-integration.sh` | Shell 集成片段 |
 | `config.example.json` | 配置模板 |
 | `deploy/proxy-forwarder.service` | systemd 服务单元 |
+| `deploy/proxy_forwarder_mcp.py` | MCP 服务器（6 个 AI agent 工具） |
 | `Dockerfile` | 容器构建 |
 | `README.en.md` | 英文文档 |
 | `CHANGELOG.md` | 变更记录 |
