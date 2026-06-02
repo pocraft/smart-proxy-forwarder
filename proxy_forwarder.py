@@ -202,15 +202,36 @@ pool = TlsConnectionPool()
 
 # ── FanVPN node watcher ──
 
-CHROME_EXT_DIR = (
-    "/mnt/c/Users/Administrator/AppData/Local/Google/Chrome/User Data"
-    "/Default/Local Extension Settings/efcglfachpgebjoeilpbmplfmacjajem"
-)
+CHROME_EXT_DIR = ""
+
+
+def _get_chrome_ext_dir() -> str:
+    """Dynamically detect Chrome extension data directory from WSL."""
+    base = "/mnt/c/Users"
+    try:
+        for user in os.listdir(base):
+            path = (
+                f"{base}/{user}/AppData/Local/Google/Chrome/User Data"
+                "/Default/Local Extension Settings/efcglfachpgebjoeilpbmplfmacjajem"
+            )
+            if os.path.isdir(path):
+                return path
+    except (FileNotFoundError, PermissionError):
+        pass
+    # Fallback to hardcoded user
+    return (
+        "/mnt/c/Users/Administrator/AppData/Local/Google/Chrome/User Data"
+        "/Default/Local Extension Settings/efcglfachpgebjoeilpbmplfmacjajem"
+    )
 
 
 def get_fanvpn_active_node() -> str:
     """Read FanVPN's current active node from Chrome extension storage.
     Returns 'host:port' string, or empty string if unable to detect."""
+    global CHROME_EXT_DIR
+    if not CHROME_EXT_DIR:
+        CHROME_EXT_DIR = _get_chrome_ext_dir()
+
     log_files = []
     try:
         for f in os.listdir(CHROME_EXT_DIR):
@@ -873,8 +894,17 @@ def main():
                             alive_any = True
                         tls.close()
                     else:
-                        s.close()
-                        alive_any = True
+                        # SOCKS5: real handshake test
+                        try:
+                            if socks5_connect(s, "www.baidu.com", 443):
+                                alive_any = True
+                        except Exception:
+                            pass
+                        finally:
+                            try:
+                                s.close()
+                            except Exception:
+                                pass
                 except Exception:
                     try:
                         s.close()
@@ -890,8 +920,8 @@ def main():
     try:
         t_api = threading.Thread(target=_start_api_server, args=(api_port,), daemon=True)
         t_api.start()
-    except Exception as e:
-        print(f"  ⚠ REST API failed: {e}")
+    except Exception:
+        print("  ⚠ REST API failed")
     print(f"  {'='*60}\n")
 
     while True:
