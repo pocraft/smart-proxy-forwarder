@@ -758,17 +758,33 @@ def main():
             time.sleep(10)
     threading.Thread(target=_write_stats, daemon=True).start()
 
-    # Health check (tests all upstreams)
+    # Health check (tests real proxy functionality)
     def _health_check():
         while True:
             alive_any = False
             for h, p in upstreams:
                 try:
+                    # Test TCP connectivity
                     s = socket.create_connection((h, p), timeout=10)
-                    s.close()
-                    alive_any = True
+                    # For CONNECT type, also test proxy actually works
+                    if upstream_type == "connect":
+                        ctx = ssl.create_default_context()
+                        ctx.check_hostname = False
+                        ctx.verify_mode = ssl.CERT_NONE
+                        tls = ctx.wrap_socket(s, server_hostname=h)
+                        tls.sendall(b"CONNECT www.baidu.com:443 HTTP/1.1\r\nHost: www.baidu.com:443\r\n\r\n")
+                        resp = tls.recv(4)
+                        if b"200" in resp or b"HTTP" in resp:
+                            alive_any = True
+                        tls.close()
+                    else:
+                        s.close()
+                        alive_any = True
                 except Exception:
-                    pass
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
             with stats.lock:
                 stats.health_status = "alive" if alive_any else "dead"
                 stats.health_last_check = time.time()
