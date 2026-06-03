@@ -247,9 +247,9 @@ def get_fanvpn_active_node() -> str:
             )
             content = result.stdout
             # Find lastNode marker — it indicates the currently active server
-            match = re.search(r'lastNode[\s\S]{0,50}"fan[^"]+\.xyz"', content)
-            if match:
-                server = re.search(r'"fan[^"]+\.xyz"', match.group())
+            matches = re.findall(r'lastNode[\s\S]{0,50}"fan[^"]+\.xyz"', content)
+            if matches:
+                server = re.search(r'"fan[^"]+\.xyz"', matches[-1])
                 if server:
                     host = server.group().strip('"')
                     # Get port for this server
