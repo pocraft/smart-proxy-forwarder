@@ -43,12 +43,14 @@ REPO_URL = "https://api.github.com/repos/601494530-create/smart-proxy-forwarder/
 def check_update() -> str:
     """Check GitHub for latest release. Returns update message or empty string."""
     try:
-        req = urllib.request.Request(REPO_URL, headers={"User-Agent": "proxy-forwarder", "Accept": "application/json"})
+        headers = {"User-Agent": "proxy-forwarder", "Accept": "application/json"}
+        req = urllib.request.Request(REPO_URL, headers=headers)
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
             latest = data.get("tag_name", "").lstrip("v")
             if latest and latest > VERSION:
-                return f"  Update available: v{VERSION} → v{latest} (https://github.com/601494530-create/smart-proxy-forwarder/releases)"
+                url = "https://github.com/pocraft/smart-proxy-forwarder/releases"
+                return f"  Update available: v{VERSION} → v{latest} ({url})"
     except Exception:
         pass
     return ""
@@ -273,7 +275,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 body{font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 20px;
      background:#0d1117;color:#c9d1d9;line-height:1.6}
 h1{color:#58a6ff}.lang-bar{text-align:right;margin-bottom:16px}
-.lang-btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:4px 12px;cursor:pointer;border-radius:4px;font-size:13px}
+.lang-btn{background:#21262d;color:#c9d1d9;
+  border:1px solid #30363d;padding:4px 12px;
+  cursor:pointer;border-radius:4px;font-size:13px}
 .lang-btn.active{background:#1f6feb;border-color:#1f6feb;color:#fff}
 pre{background:#161b22;padding:16px;border-radius:8px;overflow-x:auto}
 table{width:100%;border-collapse:collapse}td{padding:8px 0;border-bottom:1px solid #21262d}
@@ -293,20 +297,25 @@ title:'🔄 代理转发器',load:'加载中...',status:'状态',alive:'正常',
 uptime:'运行时长',conn:'连接数',connFmt:(t,a)=>t+' 总 / '+a+' 活跃',
 traffic:'流量',upstream:'上游',type:'类型',pool:'池大小',ver:'版本'
 },en:{
-title:'🔄 Proxy Forwarder',load:'Loading...',status:'Status',alive:'Alive',dead:'Dead',unknown:'Unknown',
+title:'🔄 Proxy Forwarder',
+  load:'Loading...',status:'Status',alive:'Alive',
+  dead:'Dead',unknown:'Unknown',
 uptime:'Uptime',conn:'Connections',connFmt:(t,a)=>t+' total, '+a+' active',
 traffic:'Traffic',upstream:'Upstream',type:'Type',pool:'Pool Size',ver:'Version'
 }};
 let lang='zh';
 function setLang(l){lang=l;
-document.querySelectorAll('.lang-btn').forEach(b=>b.className='lang-btn'+(b.textContent===(l==='zh'?'中文':'EN')?' active':''));
+document.querySelectorAll('.lang-btn').forEach(
+  b=>b.className='lang-btn'+(b.textContent===(l==='zh'?'中文':'EN')?' active':''));
 document.getElementById('title').textContent=L[l].title;
 document.getElementById('root').textContent=L[l].load;load();}
 async function load(){const r=await fetch('/stats'),d=await r.json();let h='';const t=L[lang];
 h+='<table>';
-h+=`<tr><td>${t.status}</td><td class="val health-${d.health}">${t[d.health]||d.health}</td></tr>`;
+h+=`<tr><td>${t.status}</td>
+  <td class="val health-${d.health}">${t[d.health]||d.health}</td></tr>`;
 h+=`<tr><td>${t.uptime}</td><td class="val">${d.uptime}</td></tr>`;
-h+=`<tr><td>${t.conn}</td><td class="val">${t.connFmt(d.total_connections,d.active_connections)}</td></tr>`;
+h+=`<tr><td>${t.conn}</td>
+  <td class="val">${t.connFmt(d.total_connections,d.active_connections)}</td></tr>`;
 h+=`<tr><td>${t.traffic}</td><td class="val">${(d.bytes_total/1024).toFixed(0)} KB</td></tr>`;
 h+=`<tr><td>${t.upstream}</td><td class="val">${d.active_upstream||'-'}</td></tr>`;
 h+=`<tr><td>${t.type}</td><td class="val">${d.upstream_type||'-'}</td></tr>`;
@@ -486,7 +495,9 @@ def socks5_connect(sock, host: str, port: int) -> bool:
     except OSError:
         return False
 
+
 def relay_traffic(src, dst, shutdown_event, bytes_counter=None):
+
     total = 0
     try:
         src.settimeout(RELAY_IDLE_TIMEOUT)
@@ -632,10 +643,16 @@ def handle_client(client, china_set, direct_domains, upstreams,
 
                 client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 shutdown_event = threading.Event()
-                t1 = threading.Thread(target=relay_traffic, args=(
-                    client, tls_remote, shutdown_event, _make_byte_counter('bytes_recv')), daemon=True)
-                t2 = threading.Thread(target=relay_traffic, args=(
-                    tls_remote, client, shutdown_event, _make_byte_counter('bytes_sent')), daemon=True)
+                t1 = threading.Thread(
+                    target=relay_traffic,
+                    args=(client, tls_remote, shutdown_event,
+                          _make_byte_counter('bytes_recv')),
+                    daemon=True)
+                t2 = threading.Thread(
+                    target=relay_traffic,
+                    args=(tls_remote, client, shutdown_event,
+                          _make_byte_counter('bytes_sent')),
+                    daemon=True)
                 t1.start()
                 t2.start()
                 t1.join()
@@ -645,8 +662,12 @@ def handle_client(client, china_set, direct_domains, upstreams,
             remote = socket.create_connection((dst_host, dst_port), timeout=15)
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             shutdown_event = threading.Event()
-            t1 = threading.Thread(target=relay_traffic, args=(client, remote, shutdown_event), daemon=True)
-            t2 = threading.Thread(target=relay_traffic, args=(remote, client, shutdown_event), daemon=True)
+            t1 = threading.Thread(
+                target=relay_traffic, args=(client, remote, shutdown_event),
+                daemon=True)
+            t2 = threading.Thread(
+                target=relay_traffic, args=(remote, client, shutdown_event),
+                daemon=True)
             t1.start()
             t2.start()
             t1.join()
@@ -656,7 +677,9 @@ def handle_client(client, china_set, direct_domains, upstreams,
         if log_requests:
             route = "proxy" if use_proxy else "direct"
             upstream = f" → {remote_host}:{remote_port}" if use_proxy else ""
-            print(f"[{time.strftime('%H:%M:%S')}] {dst_host}:{dst_port} → {route}{upstream} ({reason}) {duration:.1f}s")
+            ts = time.strftime('%H:%M:%S')
+            print(f"[{ts}] {dst_host}:{dst_port}"
+                  f" → {route}{upstream} ({reason}) {duration:.1f}s")
 
     except (OSError, socket.timeout, ssl.SSLError, ValueError):
         try:
@@ -686,7 +709,8 @@ def main():
     parser.add_argument("--listen-host", default="127.0.0.1")
     parser.add_argument("--listen-port", type=int, default=10808)
     parser.add_argument("--remote-host", default="",
-                        help="Remote HTTPS CONNECT proxy host (or comma-separated hosts for failover)")
+                        help="Remote HTTPS CONNECT proxy host "
+                             "(or comma-separated hosts for failover)")
     parser.add_argument("--remote-port", type=int, default=443)
     parser.add_argument("--config", default="")
     parser.add_argument("--insecure", "-k", action="store_true")
@@ -696,12 +720,14 @@ def main():
                         help="TLS connection pool size (default: 4)")
     parser.add_argument("--upstream-type", default="connect",
                         choices=["connect", "socks5"],
-                        help="Upstream proxy type: connect (HTTPS CONNECT) or socks5 (default: connect)")
+                        help="Upstream proxy type: connect "
+                             "(HTTPS CONNECT) or socks5 (default: connect)")
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--check-update", action="store_true",
                         help="Check GitHub for newer version and exit")
     parser.add_argument("--auto-detect-fanvpn", action="store_true",
-                        help="Auto-detect FanVPN node changes from Chrome extension and switch upstream")
+                        help="Auto-detect FanVPN node changes "
+                             "from Chrome extension and switch upstream")
     parser.epilog = """Examples:
   # Basic HTTPS CONNECT proxy
   proxy_forwarder.py --remote-host your-proxy.com --remote-port 443
@@ -805,7 +831,7 @@ def main():
     print(f"  Auto FanVPN: {'ON' if auto_detect else 'OFF'}")
     print(f"\n  Set http_proxy=http://{listen_host}:{listen_port}")
     print(f"  Set https_proxy=http://{listen_host}:{listen_port}")
-    print(f"\n  CN → Direct | INTL → Proxy (auto, DNS-safe)")
+    print("  CN → Direct | INTL → Proxy (auto, DNS-safe)")
     print(f"{'='*60}\n")
 
     def shutdown(sig, frame):
@@ -889,7 +915,9 @@ def main():
                         ctx.check_hostname = False
                         ctx.verify_mode = ssl.CERT_NONE
                         tls = ctx.wrap_socket(s, server_hostname=h)
-                        tls.sendall(b"CONNECT www.baidu.com:443 HTTP/1.1\r\nHost: www.baidu.com:443\r\n\r\n")
+                        tls.sendall(
+                            b"CONNECT www.baidu.com:443 HTTP/1.1\r\n"
+                            b"Host: www.baidu.com:443\r\n\r\n")
                         resp = tls.recv(4)
                         if b"200" in resp or b"HTTP" in resp:
                             alive_any = True
@@ -930,7 +958,9 @@ def main():
             client, addr = server.accept()
             t = threading.Thread(
                 target=handle_client,
-                args=(client, china, direct_domains, upstreams, insecure, log_requests, upstream_type),
+                args=(
+                    client, china, direct_domains, upstreams,
+                    insecure, log_requests, upstream_type),
                 daemon=True,
             )
             t.start()
