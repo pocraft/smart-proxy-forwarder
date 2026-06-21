@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/github/license/pocraft/smart-proxy-forwarder)](LICENSE)
 [![CI](https://github.com/pocraft/smart-proxy-forwarder/actions/workflows/ci.yml/badge.svg)](https://github.com/pocraft/smart-proxy-forwarder/actions)
 
-轻量级 DNS 防泄漏 CONNECT 代理转发器。**国内直连、国际走远程代理**，自动分流，零依赖。
+轻量级 DNS 防泄漏代理转发器。**国内直连、国际走远程代理**，自动分流，零依赖。同时支持 **SOCKS5** 和 **HTTP CONNECT** 客户端接入。
 
 专为 WSL 用户设计——你在 Chrome 里用 VPN 插件能翻墙，但 WSL 终端里的 curl、git、npm、Python、AI agent 也能享受同样的能力，**且不泄漏 DNS 查询**。
 
@@ -20,6 +20,7 @@
 | 功能 | 说明 |
 |------|------|
 | ✅ **智能分流** | 域名白名单直连 / IP 查归属 / 其余默认走代理 |
+| ✅ **双客户端协议** | **SOCKS5** + HTTP CONNECT 自动识别，无需配置 |
 | ✅ **双上游协议** | HTTPS CONNECT（默认） + **SOCKS5** |
 | ✅ **多上游/主备** | 逗号分隔多个代理，随机切换，一个挂了不影响 |
 | ✅ **FanVPN 自动跟随** | 自动检测 Chrome 插件节点切换，15 秒内跟随 |
@@ -44,8 +45,10 @@
 ```
 你的程序（curl / git / npm / Python / agent-browser）
     │  http_proxy=http://127.0.0.1:10808
+    │  或 socks5://127.0.0.1:10808
     ▼
 ┌─ proxy_forwarder.py ──────────────────────────────┐
+│  自动检测客户端协议：SOCKS5 ↔ HTTP CONNECT          │
 │                                                    │
 │  域名在白名单？（百度/DeepSeek/B站等）               │
 │    → 直连（快速）                                   │
@@ -61,8 +64,6 @@
 ```
 
 **没有 DNS 泄漏：** 路由判定从不进行本地 DNS 解析。只有代理服务器本身会在启动时通过系统 DNS 解析一次。
-
----
 
 ## 运行环境
 

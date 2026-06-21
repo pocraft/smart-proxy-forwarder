@@ -84,6 +84,8 @@ class ProxyStats:
         self.lock = threading.Lock()
         self.total_connections = 0
         self.active_connections = 0
+        self.socks5_connections = 0
+        self.connect_connections = 0
         self.bytes_sent = 0
         self.bytes_recv = 0
         self.start_time = time.time()
@@ -100,6 +102,8 @@ class ProxyStats:
                 "uptime": self._format_uptime(uptime),
                 "total_connections": self.total_connections,
                 "active_connections": self.active_connections,
+                "socks5_connections": self.socks5_connections,
+                "connect_connections": self.connect_connections,
                 "bytes_sent": self.bytes_sent,
                 "bytes_recv": self.bytes_recv,
                 "bytes_total": self.bytes_sent + self.bytes_recv,
@@ -537,6 +541,14 @@ def _make_byte_counter(attr):
     return _cb
 
 
+def socks5_send_error(client):
+    """Send a SOCKS5 general failure response (rep=1)."""
+    try:
+        client.sendall(bytes([5, 1, 0, 1, 0, 0, 0, 0, 0, 0]))
+    except OSError:
+        pass
+
+
 def socks5_accept_handshake(client, data):
     """Accept a SOCKS5 client connection through greeting + request.
 
@@ -587,6 +599,7 @@ def handle_client(client, china_set, direct_domains, upstreams,
     with stats.lock:
         stats.total_connections += 1
         stats.active_connections += 1
+    is_socks5 = False
     try:
         data = client.recv(BUFSIZE)
         if not data:
@@ -600,6 +613,8 @@ def handle_client(client, china_set, direct_domains, upstreams,
             dst_host, dst_port = socks_result
             log_prefix = "SOCKS5"
             is_socks5 = True
+            with stats.lock:
+                stats.socks5_connections += 1
         else:
             # ── HTTP CONNECT ──
             first_line = data.split(b"\r\n")[0].decode("utf-8", errors="replace")
@@ -620,6 +635,8 @@ def handle_client(client, china_set, direct_domains, upstreams,
                 dst_port = 443
             log_prefix = "CONNECT"
             is_socks5 = False
+            with stats.lock:
+                stats.connect_connections += 1
 
         # ── Smart routing ──
         use_proxy = True
@@ -647,7 +664,10 @@ def handle_client(client, china_set, direct_domains, upstreams,
                 # ── SOCKS5 upstream: plain TCP + SOCKS5 handshake ──
                 remote = socket.create_connection((remote_host, remote_port), timeout=15)
                 if not socks5_connect(remote, dst_host, dst_port):
-                    client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                    if is_socks5:
+                        socks5_send_error(client)
+                    else:
+                        client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
                     remote.close()
                     return
                 if not is_socks5:
@@ -674,7 +694,10 @@ def handle_client(client, china_set, direct_domains, upstreams,
                     )
                     resp = tls_remote.recv(BUFSIZE)
                     if b"200" not in resp:
-                        client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                        if is_socks5:
+                            socks5_send_error(client)
+                        else:
+                            client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
                         return
                 except OSError:
                     # Connection dead, retry with fresh one
@@ -689,7 +712,10 @@ def handle_client(client, china_set, direct_domains, upstreams,
                     )
                     resp = tls_remote.recv(BUFSIZE)
                     if b"200" not in resp:
-                        client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                        if is_socks5:
+                            socks5_send_error(client)
+                        else:
+                            client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
                         return
 
                 if not is_socks5:
@@ -736,7 +762,10 @@ def handle_client(client, china_set, direct_domains, upstreams,
 
     except (OSError, socket.timeout, ssl.SSLError, ValueError):
         try:
-            client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+            if is_socks5:
+                socks5_send_error(client)
+            else:
+                client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
         except OSError:
             pass
     finally:

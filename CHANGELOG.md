@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.2.1 (2026-06-21)
+
+### Added
+- **SOCKS5 客户端支持** — 转发器自动检测 SOCKS5 和 HTTP CONNECT 客户端，无需任何配置
+- **连接统计** — stats JSON 新增 `socks5_connections` 和 `connect_connections` 字段
+
+### Fixed
+- SOCKS5 客户端在代理失败时收到正确的 SOCKS5 错误帧（而非 HTTP 502）
+
 ## v1.2 (2026-05-30)
 
 ### Added

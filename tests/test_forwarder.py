@@ -125,6 +125,109 @@ class TestDefaultDomains(unittest.TestCase):
         self.assertIn("aliyun.com", combined)
 
 
+class TestSocks5AcceptHandshake(unittest.TestCase):
+    """Test socks5_accept_handshake function."""
+
+    def _make_sock(self, req_bytes):
+        """Helper: create a MagicMock socket that returns req_bytes on recv()."""
+        sock = MagicMock()
+        sock.recv.return_value = req_bytes
+        return sock
+
+    def _make_request(self, atyp, addr_bytes, port=443):
+        """Build a SOCKS5 CONNECT request frame."""
+        return bytes([5, 1, 0, atyp]) + addr_bytes + port.to_bytes(2, "big")
+
+    def test_ipv4(self):
+        """IPv4 address (atyp=1) should parse correctly."""
+        greeting = bytes([5, 1, 0])
+        req = self._make_request(1, bytes([192, 168, 1, 1]), 8080)
+        sock = MagicMock()
+        sock.recv.return_value = req
+        result = pf.socks5_accept_handshake(sock, greeting)
+        self.assertEqual(result, ("192.168.1.1", 8080))
+        # Check greeting response was sent
+        sock.sendall.assert_any_call(bytes([5, 0]))
+
+    def test_ipv4_default_port(self):
+        """IPv4 with default port 443."""
+        greeting = bytes([5, 1, 0])
+        req = self._make_request(1, bytes([8, 8, 8, 8]))
+        sock = MagicMock()
+        sock.recv.return_value = req
+        result = pf.socks5_accept_handshake(sock, greeting)
+        self.assertEqual(result, ("8.8.8.8", 443))
+
+    def test_domain_name(self):
+        """Domain name (atyp=3) should parse correctly."""
+        greeting = bytes([5, 1, 0])
+        host = b"www.google.com"
+        req = self._make_request(3, bytes([len(host)]) + host, 443)
+        sock = MagicMock()
+        sock.recv.return_value = req
+        result = pf.socks5_accept_handshake(sock, greeting)
+        self.assertEqual(result, ("www.google.com", 443))
+
+    def test_ipv6(self):
+        """IPv6 address (atyp=4) should parse correctly."""
+        greeting = bytes([5, 1, 0])
+        ipv6_bytes = bytes([0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0,
+                            0, 0, 0, 0, 0, 0, 0x88, 0x88])
+        req = self._make_request(4, ipv6_bytes, 993)
+        sock = MagicMock()
+        sock.recv.return_value = req
+        result = pf.socks5_accept_handshake(sock, greeting)
+        self.assertEqual(result, ("2001:4860:4860::8888", 993))
+
+    def test_invalid_greeting_not_socks5(self):
+        """First byte not 0x05 should return None."""
+        sock = MagicMock()
+        result = pf.socks5_accept_handshake(sock, b"GET / HTTP/1.1\r\n")
+        self.assertIsNone(result)
+        sock.sendall.assert_not_called()
+
+    def test_invalid_greeting_too_short(self):
+        """Greeting shorter than 2 bytes should return None."""
+        sock = MagicMock()
+        result = pf.socks5_accept_handshake(sock, bytes([5]))
+        self.assertIsNone(result)
+
+    def test_request_not_connect(self):
+        """Request cmd != 1 (not CONNECT) should return None."""
+        greeting = bytes([5, 1, 0])
+        # cmd=2 (BIND) instead of 1 (CONNECT)
+        req = bytes([5, 2, 0, 1, 192, 168, 1, 1, 0, 80])
+        sock = MagicMock()
+        sock.recv.side_effect = [greeting, req]
+        result = pf.socks5_accept_handshake(sock, greeting)
+        self.assertIsNone(result)
+
+    def test_unsupported_atyp(self):
+        """Unsupported address type should return None."""
+        greeting = bytes([5, 1, 0])
+        # atyp=0 (invalid)
+        req = bytes([5, 1, 0, 0, 0, 0, 0, 0, 0, 0])
+        sock = MagicMock()
+        sock.recv.side_effect = [greeting, req]
+        result = pf.socks5_accept_handshake(sock, greeting)
+        self.assertIsNone(result)
+
+    def test_request_too_short(self):
+        """Request shorter than 7 bytes should return None."""
+        greeting = bytes([5, 1, 0])
+        sock = MagicMock()
+        sock.recv.side_effect = [greeting, bytes([5, 1, 0, 1, 0])]
+        result = pf.socks5_accept_handshake(sock, greeting)
+        self.assertIsNone(result)
+
+    def test_oserror_handled(self):
+        """OSError during handshake should return None."""
+        sock = MagicMock()
+        sock.recv.side_effect = OSError("Connection reset")
+        result = pf.socks5_accept_handshake(sock, bytes([5, 1, 0]))
+        self.assertIsNone(result)
+
+
 class TestVersion(unittest.TestCase):
     """Test VERSION constant."""
 
