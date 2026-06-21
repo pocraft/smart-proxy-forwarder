@@ -537,11 +537,52 @@ def _make_byte_counter(attr):
     return _cb
 
 
+def socks5_accept_handshake(client, data):
+    """Accept a SOCKS5 client connection through greeting + request.
+
+    ``data`` is the first recv() data (must include at least the greeting).
+    Returns (dst_host, dst_port) on success, or None on failure.
+    """
+    try:
+        # ── Greeting: version=5, N methods, methods... ──
+        if len(data) < 2 or data[0] != 5:
+            return None
+        # Respond: version=5, no-auth(0)
+        client.sendall(bytes([5, 0]))
+
+        # ── Request ──
+        req = client.recv(BUFSIZE)
+        if len(req) < 7 or req[0] != 5 or req[1] != 1:  # version=5, cmd=CONNECT(1)
+            client.sendall(bytes([5, 2, 0, 1, 0, 0, 0, 0, 0, 0]))  # 2=not allowed
+            return None
+
+        atyp = req[3]
+        if atyp == 1:  # IPv4
+            dst_host = socket.inet_ntoa(req[4:8])
+            dst_port = int.from_bytes(req[8:10], "big")
+        elif atyp == 3:  # Domain name
+            name_len = req[4]
+            dst_host = req[5:5 + name_len].decode()
+            dst_port = int.from_bytes(req[5 + name_len:7 + name_len], "big")
+        elif atyp == 4:  # IPv6
+            dst_host = socket.inet_ntop(socket.AF_INET6, req[4:20])
+            dst_port = int.from_bytes(req[20:22], "big")
+        else:
+            client.sendall(bytes([5, 8, 0, 1, 0, 0, 0, 0, 0, 0]))  # 8=atype not supported
+            return None
+
+        # Send success response
+        client.sendall(bytes([5, 0, 0, 1, 0, 0, 0, 0]) + dst_port.to_bytes(2, "big"))
+        return dst_host, dst_port
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 # ── Connection handler ──
 
 def handle_client(client, china_set, direct_domains, upstreams,
                   insecure=False, log_requests=False, upstream_type="connect"):
-    """Handle one CONNECT request with multi-upstream + connection pool support."""
+    """Handle one CONNECT or SOCKS5 request with multi-upstream + connection pool support."""
     start_ts = time.time()
     with stats.lock:
         stats.total_connections += 1
@@ -551,25 +592,34 @@ def handle_client(client, china_set, direct_domains, upstreams,
         if not data:
             return
 
-        first_line = data.split(b"\r\n")[0].decode("utf-8", errors="replace")
-        parts = first_line.split()
-        if len(parts) < 2:
-            return
-
-        method = parts[0]
-        if method != "CONNECT":
+        # ── SOCKS5 detection (greeting starts with 0x05) ──
+        if data[0] == 5:
+            socks_result = socks5_accept_handshake(client, data)
+            if socks_result is None:
+                return
+            dst_host, dst_port = socks_result
+            log_prefix = "SOCKS5"
+            is_socks5 = True
+        else:
+            # ── HTTP CONNECT ──
+            first_line = data.split(b"\r\n")[0].decode("utf-8", errors="replace")
+            parts = first_line.split()
+            if len(parts) < 2:
+                return
+            if parts[0] != "CONNECT":
+                try:
+                    client.sendall(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
+                except OSError:
+                    pass
+                return
+            target = parts[1]
+            dst_host, _, dst_port_str = target.partition(":")
             try:
-                client.sendall(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
-            except OSError:
-                pass
-            return
-
-        target = parts[1]
-        dst_host, _, dst_port_str = target.partition(":")
-        try:
-            dst_port = int(dst_port_str) if dst_port_str else 443
-        except ValueError:
-            dst_port = 443
+                dst_port = int(dst_port_str) if dst_port_str else 443
+            except ValueError:
+                dst_port = 443
+            log_prefix = "CONNECT"
+            is_socks5 = False
 
         # ── Smart routing ──
         use_proxy = True
@@ -600,7 +650,8 @@ def handle_client(client, china_set, direct_domains, upstreams,
                     client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
                     remote.close()
                     return
-                client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                if not is_socks5:
+                    client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 shutdown_event = threading.Event()
                 t1 = threading.Thread(target=relay_traffic, args=(
                     client, remote, shutdown_event, _make_byte_counter('bytes_recv')), daemon=True)
@@ -641,7 +692,8 @@ def handle_client(client, china_set, direct_domains, upstreams,
                         client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
                         return
 
-                client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                if not is_socks5:
+                    client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 shutdown_event = threading.Event()
                 t1 = threading.Thread(
                     target=relay_traffic,
@@ -660,7 +712,8 @@ def handle_client(client, china_set, direct_domains, upstreams,
                 # Connection is consumed after tunnel closes — NOT returned to pool.
         else:
             remote = socket.create_connection((dst_host, dst_port), timeout=15)
-            client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            if not is_socks5:
+                client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             shutdown_event = threading.Event()
             t1 = threading.Thread(
                 target=relay_traffic, args=(client, remote, shutdown_event),
