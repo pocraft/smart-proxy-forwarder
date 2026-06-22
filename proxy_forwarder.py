@@ -1060,6 +1060,7 @@ DEFAULT_DIRECT_DOMAINS = {
     "*.dianping.com", "*.ele.me", "*.58.com", "*.dangdang.com",
     "*.yhd.com", "*.suning.com", "*.gmw.cn",
     "*.aliyuncs.com", "*.alibaba.com", "*.cainiao.com",
+    "*.cnb.cool",
     "*.deepseek.com", "api.deepseek.com",
     "*.people.com.cn", "*.xinhuanet.com", "*.cctv.com",
     "*.chinanews.com", "*.thepaper.cn", "*.yicai.com",
