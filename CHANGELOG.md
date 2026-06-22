@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.2.2 (2026-06-22)
+
+### Added
+- `*.cnb.cool` 加入直连白名单 — 国内代码托管镜像站不再走代理
+- `direct_domains` 配置项 — 用户可通过 config.json 自定义直连域名
+- 连接类型统计 — stats JSON 新增 `socks5_connections` 和 `connect_connections` 字段
+
+### Changed
+- TLS 连接池 4 → 8 — 减少 Chrome 多路 Google 请求排队
+
+### Fixed
+- 移除未使用的 `log_prefix` 变量 — 修复 Flake8 F841 告警
+- CI action 版本升级（actions/checkout@v5, actions/setup-python@v6, actions/upload-artifact@v5）— 适配 GitHub Runner Node.js 24
+
 ## v1.2.1 (2026-06-21)
 
 ### Added

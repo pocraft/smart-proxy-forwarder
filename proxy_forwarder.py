@@ -611,7 +611,6 @@ def handle_client(client, china_set, direct_domains, upstreams,
             if socks_result is None:
                 return
             dst_host, dst_port = socks_result
-            log_prefix = "SOCKS5"
             is_socks5 = True
             with stats.lock:
                 stats.socks5_connections += 1
@@ -633,7 +632,6 @@ def handle_client(client, china_set, direct_domains, upstreams,
                 dst_port = int(dst_port_str) if dst_port_str else 443
             except ValueError:
                 dst_port = 443
-            log_prefix = "CONNECT"
             is_socks5 = False
             with stats.lock:
                 stats.connect_connections += 1
