@@ -26,7 +26,7 @@ import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import List, Optional, Tuple
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 BUFSIZE = 65536
 CHINALIST_CACHE = "/tmp/proxy_china_ip_list.txt"

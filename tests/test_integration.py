@@ -199,7 +199,7 @@ class TestVersion(unittest.TestCase):
     """Test VERSION constant."""
 
     def test_version_matches(self):
-        self.assertEqual(pf.VERSION, "1.2.0")
+        self.assertEqual(pf.VERSION, "1.3.0")
 
     def test_version_format(self):
         parts = pf.VERSION.split(".")

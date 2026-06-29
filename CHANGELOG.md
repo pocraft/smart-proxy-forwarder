@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.3 (2026-06-04)
+
+### Added
+- FanVPN auto-detect (`--auto-detect-fanvpn`) — follow Chrome extension node switches
+- MCP server (`deploy/proxy_forwarder_mcp.py`) — 6 AI agent management tools
+- Auto-update detection (`--check-update`) — compares against GitHub release
+- Config validation — validates config.json fields on startup
+- `proxy-manager.sh export/import` — config backup and restore
+- Health check now tests real proxy functionality, not just TCP port
+
+### Changed
+- FanVPN Chrome extension path auto-detects Windows username (removed hardcoded path)
+- SOCKS5 health check now performs real SOCKS5 handshake
+- README updated to include all 17 features
+- Code quality: removed unused variables, fixed exception handling
+
+### Fixed
+- auto_detect_fanvpn now reads last active node, not first
+- port_match regex now properly extracts port with DOTALL flag
+- flake8 lint issues (line length, F541, E302)
+
 ## v1.2 (2026-05-30)
 
 ### Added
