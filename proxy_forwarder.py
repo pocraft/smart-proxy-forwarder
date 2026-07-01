@@ -497,13 +497,11 @@ def socks5_connect(sock, host: str, port: int) -> bool:
 
 
 def relay_traffic(src, dst, shutdown_event, bytes_counter=None):
-
     total = 0
     try:
-        src.settimeout(RELAY_IDLE_TIMEOUT)
+        src.settimeout(1.0)  # poll every second for shutdown_event
         dst.settimeout(RELAY_IDLE_TIMEOUT)
         while not shutdown_event.is_set():
-            src.settimeout(1.0)
             try:
                 data = src.recv(BUFSIZE)
                 if not data:
